@@ -164,6 +164,12 @@ const FOCUS_FRAME_MS: u32 = 100;
 const PREWARM_FRAME_MS: u32 = 24;
 const PREWARM_CHUNK: usize = 128;
 const GLYPH_TILE: f32 = 44.0;
+/// Content distance one wheel notch scrolls, in DIPs.
+const WHEEL_NOTCH_DIPS: f32 = 76.0;
+/// Friction for wheel momentum, per second. A lone notch glides its full
+/// distance in roughly three time constants (~210ms), matching the feel of
+/// browser smooth scrolling.
+const SCROLL_FRICTION: f32 = 14.0;
 // Marks our own SendInput batches so the keyboard hook can recognize them.
 const INJECTION_TAG: usize = 0x574d_4f4a;
 
@@ -390,6 +396,21 @@ struct TonePicker {
     entry_index: usize,
     anchor_x: f32,
     anchor_y: f32,
+}
+
+/// How the browse scroll is currently moving. Wheel input and programmatic
+/// jumps have different correct physics: a wheel tick must add velocity
+/// immediately (easing toward a target that is still accumulating starts
+/// slow and ramps up, which reads as input lag), while a category jump or
+/// keyboard reveal heads to a known destination and wants a plain ease-out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ScrollAnimation {
+    Idle,
+    /// Wheel momentum: velocity in DIPs per second under exponential
+    /// friction. The glide covers exactly the accumulated wheel distance.
+    Momentum { velocity: f32 },
+    /// Exponential ease toward `browse_scroll_target`.
+    Ease,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -779,6 +800,7 @@ struct AppState {
     browse_focus: (usize, usize),
     browse_scroll: f32,
     browse_scroll_target: f32,
+    browse_animation: ScrollAnimation,
     category_scroll: f32,
     active_category: usize,
     hovered_entry: Option<usize>,
@@ -901,6 +923,7 @@ impl AppState {
             browse_focus: (0, 0),
             browse_scroll: 0.0,
             browse_scroll_target: 0.0,
+            browse_animation: ScrollAnimation::Idle,
             category_scroll: 0.0,
             active_category: 0,
             hovered_entry: None,
@@ -973,6 +996,9 @@ impl AppState {
 
     unsafe fn update_results(&mut self) {
         self.tone_picker = None;
+        // Typing takes over from any scroll in flight.
+        self.browse_scroll_target = self.browse_scroll;
+        self.browse_animation = ScrollAnimation::Idle;
         self.matches = if self.browsing() {
             Vec::new()
         } else {
@@ -1061,12 +1087,16 @@ impl AppState {
         let item_bottom = item_top + layout.cell_height as f32;
         let viewport_height =
             (self.footer_top() - BROWSE_CONTENT_TOP).max(layout.cell_height) as f32;
+        let before = self.browse_scroll_target;
         if item_top < self.browse_scroll_target {
             self.browse_scroll_target = item_top;
         } else if item_bottom > self.browse_scroll_target + viewport_height {
             self.browse_scroll_target = item_bottom - viewport_height;
         }
         self.clamp_browse_scroll();
+        if self.browse_scroll_target != before {
+            self.browse_animation = ScrollAnimation::Ease;
+        }
     }
 
     fn rebuild_browse_sections(&mut self) {
@@ -1104,6 +1134,7 @@ impl AppState {
         self.browse_focus = (0, 0);
         self.browse_scroll = 0.0;
         self.browse_scroll_target = 0.0;
+        self.browse_animation = ScrollAnimation::Idle;
         self.category_scroll = 0.0;
         self.active_category = 0;
     }
@@ -1224,39 +1255,94 @@ impl AppState {
         }
     }
 
+    /// Page-sized keyboard scrolling: a discrete jump eased toward its
+    /// destination.
     fn scroll_browse(&mut self, delta: f32) {
         self.browse_scroll_target += delta;
         self.clamp_browse_scroll();
+        if self.browse_scroll_target != self.browse_scroll {
+            self.browse_animation = ScrollAnimation::Ease;
+        }
+    }
+
+    /// Wheel input: an impulse under exponential friction. Motion starts at
+    /// full speed the moment the notch arrives, consecutive notches during a
+    /// flick add up, and the glide covers exactly `distance` overall.
+    fn fling_browse(&mut self, distance: f32) {
+        let carried = match self.browse_animation {
+            ScrollAnimation::Momentum { velocity } => velocity,
+            _ => 0.0,
+        };
+        let velocity = carried + distance * SCROLL_FRICTION;
+        // Aim the glide at its natural resting point, clamped to content;
+        // clamping the stop also caps the velocity at an edge.
+        let stop = (self.browse_scroll + velocity / SCROLL_FRICTION)
+            .clamp(0.0, self.maximum_browse_scroll());
+        let velocity = (stop - self.browse_scroll) * SCROLL_FRICTION;
+        self.browse_scroll_target = stop;
+        self.browse_animation = if velocity == 0.0 {
+            ScrollAnimation::Idle
+        } else {
+            ScrollAnimation::Momentum { velocity }
+        };
     }
 
     /// True while the browse scroll needs animation frames. The message loop
     /// polls this after handling input and renders vsync-paced frames until
     /// the scroll settles.
     fn scroll_animation_active(&self) -> bool {
-        self.view == View::Search
+        self.browse_animation != ScrollAnimation::Idle
+            && self.view == View::Search
             && self.browsing()
-            && self.browse_scroll != self.browse_scroll_target
             && unsafe { IsWindowVisible(self.hwnd) }.as_bool()
     }
 
-    unsafe fn tick_browse_scroll(&mut self, dt: f32) {
-        // Long jumps teleport to within one viewport of the destination so
-        // the animation never renders the entire catalog in between.
-        let viewport = (self.footer_top() - BROWSE_CONTENT_TOP).max(1) as f32;
-        let span = self.browse_scroll_target - self.browse_scroll;
-        if span.abs() > viewport * 2.0 {
-            self.browse_scroll = self.browse_scroll_target - viewport * span.signum();
+    /// Cancel any scroll animation, leaving the content where it stands.
+    unsafe fn settle_scroll(&mut self) {
+        self.browse_scroll_target = self.browse_scroll;
+        self.browse_animation = ScrollAnimation::Idle;
+        self.last_frame = None;
+        unsafe {
+            self.sync_accessible_results();
         }
-        let distance = self.browse_scroll_target - self.browse_scroll;
-        if distance.abs() < 0.35 {
-            self.browse_scroll = self.browse_scroll_target;
-            self.last_frame = None;
-            unsafe {
-                self.sync_accessible_results();
+    }
+
+    unsafe fn tick_browse_scroll(&mut self, dt: f32) {
+        match self.browse_animation {
+            ScrollAnimation::Idle => {}
+            ScrollAnimation::Momentum { velocity } => {
+                let (step, velocity) = momentum_step(velocity, dt);
+                self.browse_scroll += step;
+                // Under half a pixel of glide left: land exactly.
+                if (velocity / SCROLL_FRICTION).abs() < 0.5 {
+                    self.browse_scroll = self.browse_scroll_target;
+                    unsafe {
+                        self.settle_scroll();
+                    }
+                } else {
+                    self.browse_animation = ScrollAnimation::Momentum { velocity };
+                }
             }
-        } else {
-            self.browse_scroll =
-                smooth_scroll_step(self.browse_scroll, self.browse_scroll_target, dt);
+            ScrollAnimation::Ease => {
+                // Long jumps teleport to within one viewport of the
+                // destination so the animation never renders the entire
+                // catalog in between.
+                let viewport = (self.footer_top() - BROWSE_CONTENT_TOP).max(1) as f32;
+                let span = self.browse_scroll_target - self.browse_scroll;
+                if span.abs() > viewport * 2.0 {
+                    self.browse_scroll = self.browse_scroll_target - viewport * span.signum();
+                }
+                let distance = self.browse_scroll_target - self.browse_scroll;
+                if distance.abs() < 0.35 {
+                    self.browse_scroll = self.browse_scroll_target;
+                    unsafe {
+                        self.settle_scroll();
+                    }
+                } else {
+                    self.browse_scroll =
+                        smooth_scroll_step(self.browse_scroll, self.browse_scroll_target, dt);
+                }
+            }
         }
         self.update_active_category();
     }
@@ -1265,6 +1351,7 @@ impl AppState {
         let position = position.clamp(0.0, self.maximum_browse_scroll());
         self.browse_scroll = position;
         self.browse_scroll_target = position;
+        self.browse_animation = ScrollAnimation::Idle;
         self.update_active_category();
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
@@ -1284,6 +1371,9 @@ impl AppState {
             self.active_category = category_index;
             self.ensure_active_category_visible();
             self.clamp_browse_scroll();
+            if self.browse_scroll_target != self.browse_scroll {
+                self.browse_animation = ScrollAnimation::Ease;
+            }
             unsafe {
                 self.sync_accessible_results();
                 let _ = InvalidateRect(Some(self.hwnd), None, false);
@@ -2181,8 +2271,9 @@ unsafe fn arm_focus_watch(state: &AppState) {
 
 unsafe fn hide_picker(state: &mut AppState) {
     state.tone_picker = None;
-    // Land any scroll in flight so the loop never animates a hidden window.
-    state.browse_scroll = state.browse_scroll_target;
+    // Cancel any scroll in flight so the loop never animates a hidden window.
+    state.browse_scroll_target = state.browse_scroll;
+    state.browse_animation = ScrollAnimation::Idle;
     state.last_frame = None;
     unsafe {
         stop_keyboard_capture(state);
@@ -2217,6 +2308,8 @@ unsafe fn enter_settings(state: &mut AppState) {
     if state.view != View::Settings {
         state.settings_original = state.config;
     }
+    state.browse_scroll_target = state.browse_scroll;
+    state.browse_animation = ScrollAnimation::Idle;
     state.view = View::Settings;
     state.status = None;
     state.settings_selected = 0;
@@ -3079,7 +3172,7 @@ unsafe fn route_wheel(state: &mut AppState, horizontal: bool, wparam: WPARAM, lp
             state.scroll_categories(-notches * CATEGORY_BUTTON_WIDTH * 2.0);
         }
     } else {
-        state.scroll_browse(-notches * 76.0);
+        state.fling_browse(-notches * WHEEL_NOTCH_DIPS);
     }
 }
 
@@ -5247,6 +5340,18 @@ fn smooth_scroll_step(current: f32, target: f32, dt: f32) -> f32 {
     current + (target - current) * (1.0 - (-dt * RATE).exp())
 }
 
+/// Advance a momentum glide by `dt` seconds using the exact integral of
+/// exponential friction; returns the position delta and the new velocity.
+/// An impulse of `v` glides `v / SCROLL_FRICTION` in total, so wheel
+/// distance maps one-to-one onto content distance at any frame rate.
+fn momentum_step(velocity: f32, dt: f32) -> (f32, f32) {
+    let decay = (-SCROLL_FRICTION * dt).exp();
+    (
+        velocity * (1.0 - decay) / SCROLL_FRICTION,
+        velocity * decay,
+    )
+}
+
 fn to_wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -5896,6 +6001,39 @@ mod tests {
             position = smooth_scroll_step(position, 76.0, FRAME);
         }
         assert!((76.0 - position).abs() < 0.01);
+    }
+
+    #[test]
+    fn momentum_glide_covers_exactly_the_wheel_distance() {
+        // Three notches worth of impulse must land exactly three notches
+        // away, at any frame rate.
+        for frame in [1.0 / 60.0, 1.0 / 165.0] {
+            let distance = 3.0 * WHEEL_NOTCH_DIPS;
+            let mut velocity = distance * SCROLL_FRICTION;
+            let mut position = 0.0f32;
+            for _ in 0..2000 {
+                let (step, next) = momentum_step(velocity, frame);
+                position += step;
+                velocity = next;
+            }
+            assert!((position - distance).abs() < 0.5, "landed at {position}");
+        }
+    }
+
+    #[test]
+    fn momentum_starts_at_full_speed_and_decelerates() {
+        // The first frame must cover more ground than any later frame:
+        // wheel motion starts fast and only ever slows down.
+        let frame = 1.0 / 120.0;
+        let (first, mut velocity) = momentum_step(WHEEL_NOTCH_DIPS * SCROLL_FRICTION, frame);
+        let mut previous = first;
+        for _ in 0..20 {
+            let (step, next) = momentum_step(velocity, frame);
+            assert!(step < previous);
+            previous = step;
+            velocity = next;
+        }
+        assert!(first > 0.1 * WHEEL_NOTCH_DIPS);
     }
 
     #[test]
