@@ -7,7 +7,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
@@ -23,10 +24,10 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
-    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1RenderTarget,
-    ID2D1SolidColorBrush,
+    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_IMMEDIATELY,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_ROUNDED_RECT, D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget,
+    ID2D1RenderTarget, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -84,19 +85,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, FindWindowW,
     GUITHREADINFO, GWLP_USERDATA, GetClientRect, GetCursorPos, GetForegroundWindow,
     GetGUIThreadInfo, GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, HHOOK, HMENU, IDC_ARROW, IsChild, IsWindow,
-    KBDLLHOOKSTRUCT, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL,
-    LBN_DBLCLK, LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LLKHF_INJECTED,
-    LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT, OBJID_CLIENT, PostMessageW, PostQuitMessage,
-    RegisterClassW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-    WM_RBUTTONDOWN, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN, WNDCLASSW,
-    WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
+    GetWindowTextW, GetWindowThreadProcessId, HMENU, IDC_ARROW, IsChild, IsWindow, KBDLLHOOKSTRUCT,
+    KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK,
+    LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LLKHF_INJECTED, LWA_ALPHA,
+    LoadCursorW, MSG, MSLLHOOKSTRUCT, OBJID_CLIENT, PostMessageW, PostQuitMessage, RegisterClassW,
+    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
+    ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_STYLE,
+    WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_SIZE, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN, WNDCLASSW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_TABSTOP,
+    WS_VISIBLE,
 };
 #[cfg(not(feature = "console"))]
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MESSAGEBOX_STYLE, MessageBoxW};
@@ -150,10 +151,77 @@ const PREWARM_TIMER_ID: usize = 0x0057_4d03;
 const SCROLL_FRAME_MS: u32 = 16;
 const FOCUS_FRAME_MS: u32 = 100;
 const PREWARM_FRAME_MS: u32 = 24;
-const PREWARM_CHUNK: usize = 16;
+const PREWARM_CHUNK: usize = 128;
 const GLYPH_TILE: f32 = 44.0;
+// Marks our own SendInput batches so the keyboard hook can recognize them.
+const INJECTION_TAG: usize = 0x574d_4f4a;
 
-static ACTIVE_PICKER: AtomicPtr<AppState> = AtomicPtr::new(std::ptr::null_mut());
+/// Snapshot of the capture state shared with the dedicated input thread.
+/// The hook procedures may only touch this and stateless system calls; the
+/// UI thread owns everything else.
+struct HookState {
+    active: AtomicBool,
+    keep_visible: AtomicBool,
+    hwnd: AtomicIsize,
+    target: AtomicIsize,
+}
+
+static HOOK_STATE: HookState = HookState {
+    active: AtomicBool::new(false),
+    keep_visible: AtomicBool::new(false),
+    hwnd: AtomicIsize::new(0),
+    target: AtomicIsize::new(0),
+};
+
+/// Install the low-level hooks on their own thread. Windows serializes all
+/// system input through installed low-level hooks, so they must never share
+/// a thread with rendering: a slow frame there becomes system-wide input
+/// lag. The thread only pumps hook callbacks; the hooks stay installed for
+/// the process lifetime and pass everything through while capture is off.
+fn ensure_hook_thread() -> std::result::Result<(), String> {
+    static STARTED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+    STARTED
+        .get_or_init(|| {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            std::thread::spawn(move || unsafe {
+                let instance = match windows::Win32::System::LibraryLoader::GetModuleHandleW(None) {
+                    Ok(module) => HINSTANCE(module.0),
+                    Err(error) => {
+                        let _ = sender.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+                let keyboard = match SetWindowsHookExW(
+                    WH_KEYBOARD_LL,
+                    Some(keyboard_hook_proc),
+                    Some(instance),
+                    0,
+                ) {
+                    Ok(hook) => hook,
+                    Err(error) => {
+                        let _ = sender.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+                let mouse =
+                    SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), Some(instance), 0).ok();
+                let _ = sender.send(Ok(()));
+                let mut message = MSG::default();
+                while GetMessageW(&mut message, None, 0, 0).0 > 0 {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                UnhookWindowsHookEx(keyboard).ok();
+                if let Some(mouse) = mouse {
+                    UnhookWindowsHookEx(mouse).ok();
+                }
+            });
+            receiver
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| format!("input thread did not start: {error}"))?
+        })
+        .clone()
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
@@ -709,8 +777,6 @@ struct AppState {
     dragging_slider: Option<Slider>,
     dragging_scrollbar: Option<f32>,
     capturing_shortcut: bool,
-    keyboard_hook: Option<HHOOK>,
-    mouse_hook: Option<HHOOK>,
     keyboard_state: [u8; 256],
     pending_commit: Option<bool>,
     capture_active: bool,
@@ -818,8 +884,6 @@ impl AppState {
             dragging_slider: None,
             dragging_scrollbar: None,
             capturing_shortcut: false,
-            keyboard_hook: None,
-            mouse_hook: None,
             keyboard_state: [0; 256],
             pending_commit: None,
             capture_active: false,
@@ -1624,68 +1688,59 @@ unsafe fn register_picker_class(instance: HINSTANCE) -> Result<()> {
 }
 
 unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 {
-        let state_pointer = ACTIVE_PICKER.load(Ordering::Acquire);
-        if !state_pointer.is_null() {
-            let state = unsafe { &*state_pointer };
-            if state.capture_active {
-                let foreground = unsafe { GetForegroundWindow() };
-                if !state.keep_visible && foreground != state.target {
-                    unsafe {
-                        let _ = PostMessageW(
-                            Some(state.hwnd),
-                            WM_CAPTURE_TARGET_LOST,
-                            WPARAM(0),
-                            LPARAM(0),
-                        );
-                    }
-                    return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-                }
-                // Preview mode has no target window to scope the capture, so it
-                // captures only while the cursor is over the picker; everything
-                // else keeps typing into the rest of the desktop normally.
-                if state.keep_visible && !cursor_over_window(state.hwnd) {
-                    return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-                }
-                let message = wparam.0 as u32;
-                if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP) {
-                    let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-                    // Synthetic events pass untouched. Our own SendInput batches
-                    // arrive here while the hook is live; eating one of their
-                    // UTF-16 halves would corrupt the inserted character.
-                    if event.flags.contains(LLKHF_INJECTED) {
-                        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-                    }
-                    let key_up = matches!(message, WM_KEYUP | WM_SYSKEYUP);
-                    let packed = event.scanCode as u64 | ((key_up as u64) << 32);
-                    unsafe {
-                        let _ = PostMessageW(
-                            Some(state.hwnd),
-                            WM_CAPTURED_KEY,
-                            WPARAM(event.vkCode as usize),
-                            LPARAM(packed as isize),
-                        );
-                    }
-                    // Modifier events must reach the system: discarding them here
-                    // freezes the system key-state tables, which leaves Ctrl/Shift
-                    // stuck down after the picker closes and blocks SendInput,
-                    // whose preflight waits for all modifiers to be released.
-                    // PrintScreen and Win-modified shortcuts (screenshots, OS
-                    // shortcuts) also stay with the system.
-                    let virtual_key = VIRTUAL_KEY(event.vkCode as u16);
-                    if is_modifier_key(virtual_key)
-                        || virtual_key == VK_SNAPSHOT
-                        || unsafe { GetAsyncKeyState(VK_LWIN.0 as i32) } < 0
-                        || unsafe { GetAsyncKeyState(VK_RWIN.0 as i32) } < 0
-                    {
-                        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-                    }
-                    return LRESULT(1);
-                }
-            }
-        }
+    if code < 0 || !HOOK_STATE.active.load(Ordering::Acquire) {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
-    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    let message = wparam.0 as u32;
+    if !matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP) {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+    // Our own SendInput batches pass untouched: eating one of their UTF-16
+    // halves would corrupt the inserted character. Other injected input
+    // (software remappers and similar) is treated like typing.
+    if event.flags.contains(LLKHF_INJECTED) && event.dwExtraInfo == INJECTION_TAG {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    let hwnd = HWND(HOOK_STATE.hwnd.load(Ordering::Acquire) as *mut c_void);
+    let target = HWND(HOOK_STATE.target.load(Ordering::Acquire) as *mut c_void);
+    let keep_visible = HOOK_STATE.keep_visible.load(Ordering::Acquire);
+    if !keep_visible && unsafe { GetForegroundWindow() } != target {
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_CAPTURE_TARGET_LOST, WPARAM(0), LPARAM(0));
+        }
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    // Preview mode has no target window to scope the capture, so it captures
+    // only while the cursor is over the picker; everything else keeps typing
+    // into the rest of the desktop normally.
+    if keep_visible && !cursor_over_window(hwnd) {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    let key_up = matches!(message, WM_KEYUP | WM_SYSKEYUP);
+    let packed = event.scanCode as u64 | ((key_up as u64) << 32);
+    unsafe {
+        let _ = PostMessageW(
+            Some(hwnd),
+            WM_CAPTURED_KEY,
+            WPARAM(event.vkCode as usize),
+            LPARAM(packed as isize),
+        );
+    }
+    // Modifier events must reach the system: discarding them here freezes
+    // the system key-state tables, which leaves Ctrl/Shift stuck down after
+    // the picker closes and blocks SendInput, whose preflight waits for all
+    // modifiers to be released. PrintScreen and Win-modified shortcuts
+    // (screenshots, OS shortcuts) also stay with the system.
+    let virtual_key = VIRTUAL_KEY(event.vkCode as u16);
+    if is_modifier_key(virtual_key)
+        || virtual_key == VK_SNAPSHOT
+        || unsafe { GetAsyncKeyState(VK_LWIN.0 as i32) } < 0
+        || unsafe { GetAsyncKeyState(VK_RWIN.0 as i32) } < 0
+    {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    LRESULT(1)
 }
 
 fn cursor_over_window(hwnd: HWND) -> bool {
@@ -1700,34 +1755,26 @@ fn cursor_over_window(hwnd: HWND) -> bool {
 }
 
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 {
-        let state_pointer = ACTIVE_PICKER.load(Ordering::Acquire);
-        if !state_pointer.is_null() {
-            let state = unsafe { &*state_pointer };
-            let message = wparam.0 as u32;
-            if state.capture_active
-                && !state.keep_visible
-                && matches!(
-                    message,
-                    WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
-                )
-            {
-                let event = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
-                let mut window = RECT::default();
-                let inside = unsafe { GetWindowRect(state.hwnd, &mut window) }.is_ok()
-                    && event.pt.x >= window.left
-                    && event.pt.x < window.right
-                    && event.pt.y >= window.top
-                    && event.pt.y < window.bottom;
-                if !inside {
-                    unsafe {
-                        let _ = PostMessageW(
-                            Some(state.hwnd),
-                            WM_CAPTURE_TARGET_LOST,
-                            WPARAM(0),
-                            LPARAM(0),
-                        );
-                    }
+    if code >= 0
+        && HOOK_STATE.active.load(Ordering::Acquire)
+        && !HOOK_STATE.keep_visible.load(Ordering::Acquire)
+    {
+        let message = wparam.0 as u32;
+        if matches!(
+            message,
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+        ) {
+            let event = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+            let hwnd = HWND(HOOK_STATE.hwnd.load(Ordering::Acquire) as *mut c_void);
+            let mut window = RECT::default();
+            let inside = unsafe { GetWindowRect(hwnd, &mut window) }.is_ok()
+                && event.pt.x >= window.left
+                && event.pt.x < window.right
+                && event.pt.y >= window.top
+                && event.pt.y < window.bottom;
+            if !inside {
+                unsafe {
+                    let _ = PostMessageW(Some(hwnd), WM_CAPTURE_TARGET_LOST, WPARAM(0), LPARAM(0));
                 }
             }
         }
@@ -1736,50 +1783,32 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
 }
 
 unsafe fn start_keyboard_capture(state: &mut AppState) -> Result<()> {
-    if state.keyboard_hook.is_some() {
+    if state.capture_active {
         return Ok(());
     }
+    ensure_hook_thread().map_err(|message| Error::new(HRESULT(0x80004005u32 as i32), message))?;
     unsafe {
         GetKeyboardState(&mut state.keyboard_state)?;
     }
     state.pending_commit = None;
     state.capture_active = true;
-    ACTIVE_PICKER.store(state as *mut AppState, Ordering::Release);
-    let instance = HINSTANCE(
-        unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }
-            .map(|module| module.0)?,
-    );
-    match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), Some(instance), 0) }
-    {
-        Ok(hook) => {
-            state.keyboard_hook = Some(hook);
-            state.mouse_hook =
-                unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), Some(instance), 0) }
-                    .ok();
-            Ok(())
-        }
-        Err(error) => {
-            state.capture_active = false;
-            ACTIVE_PICKER.store(std::ptr::null_mut(), Ordering::Release);
-            Err(error)
-        }
-    }
+    HOOK_STATE
+        .hwnd
+        .store(state.hwnd.0 as isize, Ordering::Release);
+    HOOK_STATE
+        .target
+        .store(state.target.0 as isize, Ordering::Release);
+    HOOK_STATE
+        .keep_visible
+        .store(state.keep_visible, Ordering::Release);
+    HOOK_STATE.active.store(true, Ordering::Release);
+    Ok(())
 }
 
 unsafe fn stop_keyboard_capture(state: &mut AppState) {
+    HOOK_STATE.active.store(false, Ordering::Release);
     state.capture_active = false;
     state.pending_commit = None;
-    ACTIVE_PICKER.store(std::ptr::null_mut(), Ordering::Release);
-    if let Some(hook) = state.keyboard_hook.take() {
-        unsafe {
-            UnhookWindowsHookEx(hook).ok();
-        }
-    }
-    if let Some(hook) = state.mouse_hook.take() {
-        unsafe {
-            UnhookWindowsHookEx(hook).ok();
-        }
-    }
 }
 
 unsafe extern "system" fn window_proc(
@@ -3538,7 +3567,7 @@ unsafe fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> 
             width: client.right.max(1) as u32,
             height: client.bottom.max(1) as u32,
         },
-        presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+        presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
     };
     let target = unsafe {
         state
@@ -3638,10 +3667,10 @@ unsafe fn prewarm_glyphs(state: &mut AppState) -> bool {
     let Ok(resources) = (unsafe { ensure_render_target(state) }) else {
         return false;
     };
-    // The hooks live on this thread; while they are installed every warmed
-    // glyph adds to system-wide input latency, so warm one at a time.
+    // While the picker is open, large chunks would delay our own input
+    // handling; hidden, the whole catalog can warm as fast as possible.
     let chunk = if state.capture_active {
-        1
+        4
     } else {
         PREWARM_CHUNK
     };
@@ -3682,7 +3711,7 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
     let resources = unsafe { ensure_render_target(state)? };
     resources
         .cold_budget
-        .set(if state.capture_active { 2 } else { 8 });
+        .set(if state.capture_active { 6 } else { 12 });
     resources.cold_skipped.set(false);
     let target = resources.target.clone();
     let brushes = resources.brushes.clone();
@@ -5114,7 +5143,7 @@ fn unicode_input(unit: u16, key_up: bool) -> INPUT {
                     KEYEVENTF_UNICODE
                 },
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: INJECTION_TAG,
             },
         },
     }
