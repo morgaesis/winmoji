@@ -80,17 +80,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetGUIThreadInfo, GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
     GetWindowTextW, GetWindowThreadProcessId, HHOOK, HMENU, IDC_ARROW, IsChild, IsWindow,
     KBDLLHOOKSTRUCT, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL,
-    LBN_DBLCLK, LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LWA_ALPHA,
-    LoadCursorW, MSG, MSLLHOOKSTRUCT, OBJID_CLIENT, PostMessageW, PostQuitMessage, RegisterClassW,
-    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
-    ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_STYLE,
-    WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_SIZE, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN, WNDCLASSW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_TABSTOP,
-    WS_VISIBLE,
+    LBN_DBLCLK, LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LLKHF_INJECTED,
+    LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT, OBJID_CLIENT, PostMessageW, PostQuitMessage,
+    RegisterClassW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+    WM_RBUTTONDOWN, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN, WNDCLASSW,
+    WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(not(feature = "console"))]
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MESSAGEBOX_STYLE, MessageBoxW};
@@ -128,7 +128,9 @@ const SECTION_HEADING_HEIGHT: i32 = 26;
 const SECTION_GAP: i32 = 10;
 const RESULTS_ID: usize = 2;
 const VK_A_VALUE: u16 = 0x41;
+const VK_D_VALUE: u16 = 0x44;
 const VK_G_VALUE: u16 = 0x47;
+const VK_U_VALUE: u16 = 0x55;
 const VK_V_VALUE: u16 = 0x56;
 const VK_H_VALUE: u16 = 0x48;
 const VK_J_VALUE: u16 = 0x4a;
@@ -243,8 +245,8 @@ impl BrowseCategory {
 
     fn icon(self) -> &'static str {
         match self {
-            Self::Recent => "⌂",
-            Self::Smileys => "☺",
+            Self::Recent => "🏠",
+            Self::Smileys => "😀",
             Self::People => "👋",
             Self::Animals => "🐻",
             Self::Food => "🍕",
@@ -260,7 +262,9 @@ impl BrowseCategory {
     fn uses_color_icon(self) -> bool {
         matches!(
             self,
-            Self::People
+            Self::Recent
+                | Self::Smileys
+                | Self::People
                 | Self::Animals
                 | Self::Food
                 | Self::Travel
@@ -1578,6 +1582,12 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 let message = wparam.0 as u32;
                 if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP) {
                     let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+                    // Synthetic events pass untouched. Our own SendInput batches
+                    // arrive here while the hook is live; eating one of their
+                    // UTF-16 halves would corrupt the inserted character.
+                    if event.flags.contains(LLKHF_INJECTED) {
+                        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+                    }
                     let key_up = matches!(message, WM_KEYUP | WM_SYSKEYUP);
                     let packed = event.scanCode as u64 | ((key_up as u64) << 32);
                     unsafe {
@@ -2077,6 +2087,38 @@ unsafe fn adjust_setting(state: &mut AppState, delta: isize) {
     }
 }
 
+/// Enter on a settings row changes that row's value in place (cycling with
+/// wrap-around) or records a new shortcut; the change previews immediately.
+unsafe fn activate_setting(state: &mut AppState) {
+    match state.settings_selected {
+        2 => {
+            state.config.details = if state.config.details == DetailMode::Both {
+                DetailMode::None
+            } else {
+                state.config.details.next(1)
+            };
+        }
+        3 => {
+            state.config.emoji_font = match state.config.emoji_font {
+                EmojiFont::SegoeEmoji => EmojiFont::SegoeSymbol,
+                EmojiFont::SegoeSymbol => EmojiFont::SegoeEmoji,
+            };
+            if let Err(error) = unsafe { state.rebuild_formats() } {
+                state.status = Some(format!("Could not change emoji font: {error}"));
+            }
+        }
+        4 => {
+            state.capturing_shortcut = true;
+            state.status = Some("Press the new shortcut".to_string());
+        }
+        _ => {}
+    }
+    unsafe {
+        state.sync_accessible_results();
+        let _ = InvalidateRect(Some(state.hwnd), None, false);
+    }
+}
+
 unsafe fn save_settings(state: &mut AppState) {
     let previous_hotkey = state.registered_hotkey;
     if let Err(error) = unsafe { apply_registered_hotkey(state) } {
@@ -2410,27 +2452,13 @@ unsafe fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: boo
             .section_layouts()
             .get(state.browse_focus.0)
             .map_or(1, |layout| layout.columns) as isize;
-        if control && key.0 == VK_H_VALUE {
-            unsafe {
-                state.jump_to_category(state.active_category.saturating_sub(1));
-            }
-            return true;
-        }
-        if control && key.0 == VK_L_VALUE {
-            unsafe {
-                state.jump_to_category(
-                    (state.active_category + 1).min(BrowseCategory::ALL.len() - 1),
-                );
-            }
-            return true;
-        }
-        if key == VK_LEFT {
+        if key == VK_LEFT || (control && key.0 == VK_H_VALUE) {
             unsafe {
                 state.move_browse_selection(-1);
             }
             return true;
         }
-        if key == VK_RIGHT {
+        if key == VK_RIGHT || (control && key.0 == VK_L_VALUE) {
             unsafe {
                 state.move_browse_selection(1);
             }
@@ -2448,15 +2476,18 @@ unsafe fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: boo
             }
             return true;
         }
-        if key == VK_PRIOR {
+        let viewport = (state.footer_top() - BROWSE_CONTENT_TOP) as f32;
+        if key == VK_PRIOR || (control && key.0 == VK_U_VALUE) {
+            let amount = if key == VK_PRIOR { 0.88 } else { 0.5 };
             unsafe {
-                state.scroll_browse(-((state.footer_top() - BROWSE_CONTENT_TOP) as f32 * 0.88));
+                state.scroll_browse(-viewport * amount);
             }
             return true;
         }
-        if key == VK_NEXT {
+        if key == VK_NEXT || (control && key.0 == VK_D_VALUE) {
+            let amount = if key == VK_NEXT { 0.88 } else { 0.5 };
             unsafe {
-                state.scroll_browse((state.footer_top() - BROWSE_CONTENT_TOP) as f32 * 0.88);
+                state.scroll_browse(viewport * amount);
             }
             return true;
         }
@@ -2517,9 +2548,15 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
         return true;
     }
 
-    if key == VK_ESCAPE || key == VK_RETURN {
+    if key == VK_ESCAPE {
         unsafe {
             save_settings(state);
+        }
+        return true;
+    }
+    if key == VK_RETURN {
+        unsafe {
+            activate_setting(state);
         }
         return true;
     }
@@ -2582,12 +2619,11 @@ unsafe fn commit_selection(state: &mut AppState, close_after: bool) {
     };
     let target = state.target;
     let target_focus = state.target_focus;
-    // The injected input must not be re-captured by our own hooks, so capture
-    // stops during the send. The window only hides when the picker is done;
-    // an insert that keeps the picker open leaves it exactly where it is.
-    unsafe {
-        stop_keyboard_capture(state);
-        if close_after {
+    // Capture stays active: the hook passes injected events through, so the
+    // send is not re-captured. An insert that keeps the picker open leaves
+    // the window exactly where it is.
+    if close_after {
+        unsafe {
             hide_picker(state);
         }
     }
@@ -2599,7 +2635,8 @@ unsafe fn commit_selection(state: &mut AppState, close_after: bool) {
             if !close_after {
                 state.rebuild_browse_sections_preserving_view();
                 unsafe {
-                    restore_picker(state);
+                    state.sync_accessible_results();
+                    let _ = InvalidateRect(Some(state.hwnd), None, false);
                 }
             } else {
                 state.rebuild_browse_sections();
@@ -2609,7 +2646,13 @@ unsafe fn commit_selection(state: &mut AppState, close_after: bool) {
             eprintln!("winmoji: input failed: {error}");
             state.status =
                 Some("Could not return to the previous app. Nothing was inserted.".to_string());
-            unsafe { restore_picker(state) };
+            if close_after {
+                unsafe { restore_picker(state) };
+            } else {
+                unsafe {
+                    let _ = InvalidateRect(Some(state.hwnd), None, false);
+                }
+            }
         }
     }
 }
@@ -4026,7 +4069,7 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
     unsafe {
         draw_text(
             &target,
-            "Arrow keys adjust. Space records the shortcut.",
+            "Arrow keys adjust. Enter changes the focused value.",
             &state.formats.center,
             rect(24.0, hint_top, width as f32 - 24.0, hint_top + 22.0),
             &secondary,
@@ -4058,7 +4101,7 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
         } else {
             draw_text(
                 &target,
-                "Esc or Enter goes back",
+                "Esc goes back",
                 &state.formats.center,
                 rect(140.0, footer_top, width as f32 - 74.0, height as f32 - 2.0),
                 &secondary,
