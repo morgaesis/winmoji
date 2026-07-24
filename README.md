@@ -18,7 +18,7 @@ Run `winmoji.exe` to show the picker. The default global shortcut is `Ctrl+Shift
 - Press Ctrl+Enter to insert the selected text and close the picker.
 - Clear the search or press Ctrl+G to browse the continuously scrolling catalog in the same window.
 - Emoji follow the Unicode CLDR groups for smileys, people, animals, food, travel, activities, objects, and flags. One Symbols group contains emoji symbols plus the broad Unicode symbol catalog, followed by a dedicated Emoticons group.
-- In the grid, use the arrow keys or Ctrl+H, Ctrl+J, Ctrl+K, and Ctrl+L to move, Page Up and Page Down or Ctrl+U and Ctrl+D to scroll by pages, the mouse wheel to browse smoothly, or click a category button to jump. The category rail scrolls with a vertical or horizontal wheel or trackpad gesture while hovering it, with its edge buttons, or by clicking.
+- In the grid, use the arrow keys or Ctrl+H, Ctrl+J, Ctrl+K, and Ctrl+L to move, Ctrl+U and Ctrl+D to move the selection by half a page, Page Up and Page Down to scroll the view, the mouse wheel to browse smoothly, or click a category button to jump. The category rail scrolls with a vertical or horizontal wheel or trackpad gesture while hovering it, with its edge buttons, or by clicking.
 - Right-click an emoji that supports skin tones to pick a variant for a single insert. The permanent default tone is a settings row and applies to display and inserts everywhere.
 - Drag the scrollbar for direct continuous positioning. Category focus follows the visible section while scrolling.
 - Grid rows are rendered on demand for the visible viewport, so large categories do not create work for offscreen emoji during scrolling.

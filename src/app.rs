@@ -703,6 +703,7 @@ struct AppState {
     hovered_entry: Option<usize>,
     hovered_target: Option<HitTarget>,
     tone_picker: Option<TonePicker>,
+    category_icon_entries: [Option<usize>; BrowseCategory::ALL.len()],
     settings_selected: usize,
     settings_original: Config,
     dragging_slider: Option<Slider>,
@@ -736,6 +737,11 @@ struct RenderResources {
     target: ID2D1HwndRenderTarget,
     brushes: Brushes,
     glyphs: Rc<RefCell<GlyphCache>>,
+    /// Cold rasterizations allowed in the current frame. The low-level hooks
+    /// run on this thread, so a long frame stalls system-wide input; missing
+    /// glyphs fill in over the next frames instead.
+    cold_budget: Rc<std::cell::Cell<i32>>,
+    cold_skipped: Rc<std::cell::Cell<bool>>,
 }
 
 #[derive(Clone)]
@@ -797,6 +803,16 @@ impl AppState {
             hovered_entry: None,
             hovered_target: None,
             tone_picker: None,
+            category_icon_entries: BrowseCategory::ALL.map(|category| {
+                category
+                    .uses_color_icon()
+                    .then(|| {
+                        catalog::entries()
+                            .iter()
+                            .position(|entry| entry.glyph == category.icon())
+                    })
+                    .flatten()
+            }),
             settings_selected: 0,
             settings_original: config,
             dragging_slider: None,
@@ -2051,6 +2067,9 @@ unsafe fn show_picker(
     unsafe {
         state.update_results();
         position_near_cursor(state);
+        // Render before showing: the window otherwise appears as an empty
+        // frame until the first WM_PAINT lands.
+        let _ = draw_picker(state);
         let _ = ShowWindow(state.hwnd, SW_SHOWNOACTIVATE);
         arm_focus_watch(state);
         if let Err(error) = start_keyboard_capture(state) {
@@ -2575,17 +2594,28 @@ unsafe fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: boo
             return true;
         }
         let viewport = (state.footer_top() - BROWSE_CONTENT_TOP) as f32;
-        if key == VK_PRIOR || (control && key.0 == VK_U_VALUE) {
-            let amount = if key == VK_PRIOR { 0.88 } else { 0.5 };
+        if control && (key.0 == VK_U_VALUE || key.0 == VK_D_VALUE) {
+            let cell = state
+                .section_layouts()
+                .get(state.browse_focus.0)
+                .map_or(GRID_CELL, |layout| layout.cell_height)
+                .max(1);
+            let rows = ((viewport * 0.5) / cell as f32).max(1.0) as isize;
+            let jump = rows * columns;
             unsafe {
-                state.scroll_browse(-viewport * amount);
+                state.move_browse_selection(if key.0 == VK_U_VALUE { -jump } else { jump });
             }
             return true;
         }
-        if key == VK_NEXT || (control && key.0 == VK_D_VALUE) {
-            let amount = if key == VK_NEXT { 0.88 } else { 0.5 };
+        if key == VK_PRIOR {
             unsafe {
-                state.scroll_browse(viewport * amount);
+                state.scroll_browse(-viewport * 0.88);
+            }
+            return true;
+        }
+        if key == VK_NEXT {
+            unsafe {
+                state.scroll_browse(viewport * 0.88);
             }
             return true;
         }
@@ -3520,6 +3550,8 @@ unsafe fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> 
         target,
         brushes,
         glyphs: Rc::new(RefCell::new(HashMap::new())),
+        cold_budget: Rc::new(std::cell::Cell::new(0)),
+        cold_skipped: Rc::new(std::cell::Cell::new(false)),
     };
     state.render = Some(resources.clone());
     // A fresh device means an empty glyph cache; refill it during idle time
@@ -3545,6 +3577,11 @@ unsafe fn glyph_bitmap(
     if let Some(cached) = resources.glyphs.borrow().get(&key) {
         return cached.clone();
     }
+    if resources.cold_budget.get() <= 0 {
+        resources.cold_skipped.set(true);
+        return None;
+    }
+    resources.cold_budget.set(resources.cold_budget.get() - 1);
     let glyph = toned.unwrap_or(&entry.glyph);
     let created = unsafe { render_glyph_bitmap(state, resources, glyph) }.ok();
     resources.glyphs.borrow_mut().insert(key, created.clone());
@@ -3601,8 +3638,15 @@ unsafe fn prewarm_glyphs(state: &mut AppState) -> bool {
     let Ok(resources) = (unsafe { ensure_render_target(state) }) else {
         return false;
     };
+    // The hooks live on this thread; while they are installed every warmed
+    // glyph adds to system-wide input latency, so warm one at a time.
+    let chunk = if state.capture_active {
+        1
+    } else {
+        PREWARM_CHUNK
+    };
     let mut warmed = 0;
-    while warmed < PREWARM_CHUNK {
+    while warmed < chunk {
         let mut position = state.prewarm_cursor;
         let mut entry_index = None;
         for section in &state.browse_sections {
@@ -3636,6 +3680,10 @@ unsafe fn draw_picker(state: &mut AppState) -> Result<()> {
 
 unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
     let resources = unsafe { ensure_render_target(state)? };
+    resources
+        .cold_budget
+        .set(if state.capture_active { 2 } else { 8 });
+    resources.cold_skipped.set(false);
     let target = resources.target.clone();
     let brushes = resources.brushes.clone();
     let (width, height) = state.dimensions();
@@ -3826,6 +3874,11 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
         );
         target.EndDraw(None, None)?;
     }
+    if resources.cold_skipped.get() {
+        unsafe {
+            let _ = InvalidateRect(Some(state.hwnd), None, false);
+        }
+    }
     Ok(())
 }
 
@@ -3981,25 +4034,34 @@ unsafe fn draw_browser(
                     accent,
                 );
             }
-            let format = if *category == BrowseCategory::Emoticons {
-                &state.formats.emoticon_icon
-            } else if category.uses_color_icon() {
-                &state.formats.glyph
+            if let Some(entry_index) = state.category_icon_entries[index] {
+                draw_glyph(
+                    state,
+                    resources,
+                    entry_index,
+                    rect(
+                        bounds.left + 4.0,
+                        bounds.top + 3.0,
+                        bounds.right - 4.0,
+                        bounds.bottom - 5.0,
+                    ),
+                    if active { primary } else { secondary },
+                );
             } else {
-                &state.formats.symbol
-            };
-            draw_text(
-                target,
-                category.icon(),
-                format,
-                bounds,
-                if active { primary } else { secondary },
-                if category.uses_color_icon() {
-                    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT
+                let format = if *category == BrowseCategory::Emoticons {
+                    &state.formats.emoticon_icon
                 } else {
-                    D2D1_DRAW_TEXT_OPTIONS_NONE
-                },
-            );
+                    &state.formats.symbol
+                };
+                draw_text(
+                    target,
+                    category.icon(),
+                    format,
+                    bounds,
+                    if active { primary } else { secondary },
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
         }
     }
     unsafe {
@@ -4748,8 +4810,10 @@ unsafe fn draw_glyph(
     let target = &resources.target;
     let entry = &catalog::entries()[entry_index];
     if entry.kind == "Emoji" && state.config.emoji_font == EmojiFont::SegoeEmoji {
-        // Fast path: blit the cached bitmap instead of rasterizing the
-        // color glyph again.
+        // Blit the cached bitmap instead of rasterizing the color glyph
+        // again. A budget-skipped glyph stays blank this frame and fills in
+        // on the follow-up paint; falling back to DrawText here would spend
+        // exactly the rasterization time the budget exists to avoid.
         if let Some(bitmap) = unsafe { glyph_bitmap(state, resources, entry_index) } {
             let side = (bounds.right - bounds.left).min(bounds.bottom - bounds.top);
             let center_x = (bounds.left + bounds.right) / 2.0;
@@ -4769,8 +4833,8 @@ unsafe fn draw_glyph(
                     None,
                 );
             }
-            return;
         }
+        return;
     }
     if entry.kind == "Emoticon" {
         // Wide emoticons drop to a smaller face and clip to their tile
