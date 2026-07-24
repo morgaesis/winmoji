@@ -12,22 +12,30 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
-    COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HGLOBAL, HINSTANCE, HWND, LPARAM,
-    LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM,
+    COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HGLOBAL, HINSTANCE, HMODULE,
+    HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_ALPHA_MODE_UNKNOWN,
-    D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
-    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_IMMEDIATELY,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_ROUNDED_RECT, D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget,
+    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
+    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_ROUNDED_RECT, D2D1CreateFactory, ID2D1Bitmap, ID2D1DeviceContext, ID2D1Factory1,
     ID2D1RenderTarget, ID2D1SolidColorBrush,
+};
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
+};
+use windows::Win32::Graphics::Dxgi::{
+    DXGI_MWA_NO_ALT_ENTER, DXGI_MWA_NO_WINDOW_CHANGES, DXGI_PRESENT, DXGI_SCALING_NONE,
+    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2,
+    IDXGISurface, IDXGISwapChain2,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -41,7 +49,9 @@ use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromPoint, PAINTSTRUCT, ScreenToClient,
@@ -62,8 +72,8 @@ use windows::Win32::System::Registry::{
     RegCreateKeyExW, RegDeleteValueW, RegSetValueExW,
 };
 use windows::Win32::System::Threading::{
-    AttachThreadInput, CreateMutexW, GetCurrentThreadId, OpenProcess, PROCESS_SYNCHRONIZE, Sleep,
-    WaitForSingleObject,
+    AttachThreadInput, CreateMutexW, GetCurrentThreadId, INFINITE, OpenProcess,
+    PROCESS_SYNCHRONIZE, Sleep, WaitForSingleObject,
 };
 use windows::Win32::UI::Accessibility::{CLSID_AccPropServices, IAccPropServices, PROPID_ACC_NAME};
 use windows::Win32::UI::Controls::{
@@ -85,23 +95,26 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, FindWindowW,
     GUITHREADINFO, GWLP_USERDATA, GetClientRect, GetCursorPos, GetForegroundWindow,
     GetGUIThreadInfo, GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, HMENU, IDC_ARROW, IsChild, IsWindow, KBDLLHOOKSTRUCT,
-    KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK,
-    LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LLKHF_INJECTED, LWA_ALPHA,
-    LoadCursorW, MSG, MSLLHOOKSTRUCT, OBJID_CLIENT, PostMessageW, PostQuitMessage, RegisterClassW,
-    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow,
+    GetWindowTextW, GetWindowThreadProcessId, HMENU, IDC_ARROW, IsChild, IsWindow, IsWindowVisible,
+    KBDLLHOOKSTRUCT, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL,
+    LBN_DBLCLK, LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LLKHF_INJECTED,
+    LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx,
+    OBJID_CLIENT, PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, QS_ALLINPUT,
+    RegisterClassW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
+    SetForegroundWindow,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
     ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_STYLE,
     WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
     WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_SIZE, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN, WNDCLASSW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_SIZE,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN, WNDCLASSW, WS_CHILD, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_TABSTOP,
     WS_VISIBLE,
 };
 #[cfg(not(feature = "console"))]
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MESSAGEBOX_STYLE, MessageBoxW};
-use windows::core::{Error, HRESULT, PCWSTR, Result, w};
+use windows::core::{Error, HRESULT, Interface, PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
 use crate::catalog::{self, Match};
@@ -145,10 +158,8 @@ const VK_J_VALUE: u16 = 0x4a;
 const VK_K_VALUE: u16 = 0x4b;
 const VK_L_VALUE: u16 = 0x4c;
 const VK_OEM_COMMA_VALUE: u16 = 0xbc;
-const SCROLL_TIMER_ID: usize = 0x0057_4d01;
 const FOCUS_TIMER_ID: usize = 0x0057_4d02;
 const PREWARM_TIMER_ID: usize = 0x0057_4d03;
-const SCROLL_FRAME_MS: u32 = 16;
 const FOCUS_FRAME_MS: u32 = 100;
 const PREWARM_FRAME_MS: u32 = 24;
 const PREWARM_CHUNK: usize = 128;
@@ -162,6 +173,7 @@ const INJECTION_TAG: usize = 0x574d_4f4a;
 struct HookState {
     active: AtomicBool,
     keep_visible: AtomicBool,
+    capturing_shortcut: AtomicBool,
     hwnd: AtomicIsize,
     target: AtomicIsize,
 }
@@ -169,6 +181,7 @@ struct HookState {
 static HOOK_STATE: HookState = HookState {
     active: AtomicBool::new(false),
     keep_visible: AtomicBool::new(false),
+    capturing_shortcut: AtomicBool::new(false),
     hwnd: AtomicIsize::new(0),
     target: AtomicIsize::new(0),
 };
@@ -783,29 +796,53 @@ struct AppState {
     registered_hotkey: Hotkey,
     dpi: u32,
     status: Option<String>,
-    d2d_factory: ID2D1Factory,
+    d2d_factory: ID2D1Factory1,
     dwrite_factory: IDWriteFactory,
     render: Option<RenderResources>,
     prewarm_cursor: usize,
     formats: TextFormats,
     keep_visible: bool,
+    /// Timestamp of the last animation frame; drives time-based smoothing so
+    /// scroll speed is identical at 60Hz and 165Hz.
+    last_frame: Option<Instant>,
 }
 
-/// Device-bound rendering state: the swap target, the brush set, and the
+/// Device-bound rendering state: the swap chain, the brush set, and the
 /// per-entry glyph bitmap cache. Color emoji rasterization costs several
 /// milliseconds per glyph; each glyph renders once into a small bitmap and
 /// every later frame blits it. All of this dies together on device loss.
 /// Cache key: catalog entry index plus the applied skin tone ordinal.
 type GlyphCache = HashMap<(usize, u8), Option<ID2D1Bitmap>>;
 
+/// Owns the swap chain's frame-latency waitable handle so it closes exactly
+/// once when the device stack is torn down.
+struct FrameLatencyGate(HANDLE);
+
+impl Drop for FrameLatencyGate {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct RenderResources {
-    target: ID2D1HwndRenderTarget,
+    /// The device context viewed through its render-target interface; all
+    /// drawing code works against this.
+    target: ID2D1RenderTarget,
+    context: ID2D1DeviceContext,
+    swapchain: IDXGISwapChain2,
+    /// Signals when the compositor can accept a new frame; waiting on it
+    /// paces animation to the monitor refresh rate with one frame of latency.
+    frame_gate: Rc<FrameLatencyGate>,
     brushes: Brushes,
     glyphs: Rc<RefCell<GlyphCache>>,
-    /// Cold rasterizations allowed in the current frame. The low-level hooks
-    /// run on this thread, so a long frame stalls system-wide input; missing
-    /// glyphs fill in over the next frames instead.
+    /// Cold rasterizations allowed in the current frame; a scroll frame never
+    /// stalls on rasterizing the whole viewport, missing glyphs fill in over
+    /// the next frames instead.
     cold_budget: Rc<std::cell::Cell<i32>>,
     cold_skipped: Rc<std::cell::Cell<bool>>,
 }
@@ -823,7 +860,7 @@ struct Brushes {
     danger: ID2D1SolidColorBrush,
 }
 
-unsafe fn create_brushes(target: &ID2D1HwndRenderTarget) -> Result<Brushes> {
+unsafe fn create_brushes(target: &ID2D1RenderTarget) -> Result<Brushes> {
     unsafe {
         Ok(Brushes {
             surface: solid_brush(target, 0x1b1e25)?,
@@ -841,7 +878,7 @@ unsafe fn create_brushes(target: &ID2D1HwndRenderTarget) -> Result<Brushes> {
 
 impl AppState {
     unsafe fn new(keep_visible: bool, config: Config) -> Result<Self> {
-        let d2d_factory: ID2D1Factory =
+        let d2d_factory: ID2D1Factory1 =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
         let dwrite_factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
@@ -896,6 +933,7 @@ impl AppState {
             prewarm_cursor: 0,
             formats,
             keep_visible,
+            last_frame: None,
         };
         state.rebuild_browse_sections();
         state.matches = Vec::new();
@@ -1029,9 +1067,6 @@ impl AppState {
             self.browse_scroll_target = item_bottom - viewport_height;
         }
         self.clamp_browse_scroll();
-        unsafe {
-            let _ = SetTimer(Some(self.hwnd), SCROLL_TIMER_ID, SCROLL_FRAME_MS, None);
-        }
     }
 
     fn rebuild_browse_sections(&mut self) {
@@ -1189,16 +1224,22 @@ impl AppState {
         }
     }
 
-    unsafe fn scroll_browse(&mut self, delta: f32) {
+    fn scroll_browse(&mut self, delta: f32) {
         self.browse_scroll_target += delta;
         self.clamp_browse_scroll();
-        unsafe {
-            let _ = SetTimer(Some(self.hwnd), SCROLL_TIMER_ID, SCROLL_FRAME_MS, None);
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
-        }
     }
 
-    unsafe fn tick_browse_scroll(&mut self) {
+    /// True while the browse scroll needs animation frames. The message loop
+    /// polls this after handling input and renders vsync-paced frames until
+    /// the scroll settles.
+    fn scroll_animation_active(&self) -> bool {
+        self.view == View::Search
+            && self.browsing()
+            && self.browse_scroll != self.browse_scroll_target
+            && unsafe { IsWindowVisible(self.hwnd) }.as_bool()
+    }
+
+    unsafe fn tick_browse_scroll(&mut self, dt: f32) {
         // Long jumps teleport to within one viewport of the destination so
         // the animation never renders the entire catalog in between.
         let viewport = (self.footer_top() - BROWSE_CONTENT_TOP).max(1) as f32;
@@ -1209,17 +1250,15 @@ impl AppState {
         let distance = self.browse_scroll_target - self.browse_scroll;
         if distance.abs() < 0.35 {
             self.browse_scroll = self.browse_scroll_target;
+            self.last_frame = None;
             unsafe {
-                KillTimer(Some(self.hwnd), SCROLL_TIMER_ID).ok();
                 self.sync_accessible_results();
             }
         } else {
-            self.browse_scroll = smooth_scroll_step(self.browse_scroll, self.browse_scroll_target);
+            self.browse_scroll =
+                smooth_scroll_step(self.browse_scroll, self.browse_scroll_target, dt);
         }
         self.update_active_category();
-        unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
-        }
     }
 
     unsafe fn set_browse_scroll_immediate(&mut self, position: f32) {
@@ -1246,7 +1285,6 @@ impl AppState {
             self.ensure_active_category_visible();
             self.clamp_browse_scroll();
             unsafe {
-                let _ = SetTimer(Some(self.hwnd), SCROLL_TIMER_ID, SCROLL_FRAME_MS, None);
                 self.sync_accessible_results();
                 let _ = InvalidateRect(Some(self.hwnd), None, false);
             }
@@ -1572,49 +1610,61 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
             show_picker(state_pointer, None, None);
         }
 
+        // The loop separates input from frame pacing: every pending message
+        // is drained first, then, while a scroll animation is live, one frame
+        // renders paced by the swap chain's latency waitable (the compositor
+        // clock). Idle, the thread blocks in MsgWaitForMultipleObjectsEx and
+        // costs nothing. Animation never rides WM_TIMER or WM_PAINT, whose
+        // lowest-priority coalesced delivery is what made scrolling stutter.
         let mut message = MSG::default();
-        loop {
-            let message_result = GetMessageW(&mut message, None, 0, 0).0;
-            if message_result == -1 {
-                let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
-                let _ = DestroyWindow(hwnd);
-                drop(Box::from_raw(state_pointer));
-                CloseHandle(mutex)?;
-                return Err(Error::from_win32());
-            }
-            if message_result == 0 {
-                break;
-            }
-            let state = &mut *state_pointer;
-            // Wheel messages can land on the accessibility listbox child;
-            // route them here before dispatch reaches the system control.
-            if (message.message == WM_MOUSEWHEEL || message.message == WM_MOUSEHWHEEL)
-                && (message.hwnd == state.hwnd || message.hwnd == state.accessible_results)
-            {
-                route_wheel(
-                    state,
-                    message.message == WM_MOUSEHWHEEL,
-                    message.wParam,
-                    message.lParam,
-                );
-                continue;
-            }
-            if (message.message == WM_KEYDOWN || message.message == WM_SYSKEYDOWN)
-                && (message.hwnd == state.accessible_results || message.hwnd == state.hwnd)
-            {
-                let key = VIRTUAL_KEY(message.wParam.0 as u16);
-                let control = GetKeyState(VK_CONTROL.0 as i32) < 0;
-                let handled = if state.view == View::Settings {
-                    handle_settings_key(state, key, control)
-                } else {
-                    handle_picker_key(state, key, control)
-                };
-                if handled {
+        'run: loop {
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                if message.message == WM_QUIT {
+                    break 'run;
+                }
+                let state = &mut *state_pointer;
+                // Wheel messages can land on the accessibility listbox child;
+                // route them here before dispatch reaches the system control.
+                if (message.message == WM_MOUSEWHEEL || message.message == WM_MOUSEHWHEEL)
+                    && (message.hwnd == state.hwnd || message.hwnd == state.accessible_results)
+                {
+                    route_wheel(
+                        state,
+                        message.message == WM_MOUSEHWHEEL,
+                        message.wParam,
+                        message.lParam,
+                    );
                     continue;
                 }
+                if (message.message == WM_KEYDOWN || message.message == WM_SYSKEYDOWN)
+                    && (message.hwnd == state.accessible_results || message.hwnd == state.hwnd)
+                {
+                    let key = VIRTUAL_KEY(message.wParam.0 as u16);
+                    let control = GetKeyState(VK_CONTROL.0 as i32) < 0;
+                    let handled = if state.view == View::Settings {
+                        handle_settings_key(state, key, control)
+                    } else {
+                        handle_picker_key(state, key, control)
+                    };
+                    if handled {
+                        continue;
+                    }
+                }
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
             }
-            let _ = TranslateMessage(&message);
-            DispatchMessageW(&message);
+            let state = &mut *state_pointer;
+            if state.scroll_animation_active() {
+                render_animation_frame(state);
+            } else {
+                state.last_frame = None;
+                let _ = MsgWaitForMultipleObjectsEx(
+                    None,
+                    INFINITE,
+                    QS_ALLINPUT,
+                    MWMO_INPUTAVAILABLE,
+                );
+            }
         }
 
         let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
@@ -1700,6 +1750,19 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     // halves would corrupt the inserted character. Other injected input
     // (software remappers and similar) is treated like typing.
     if event.flags.contains(LLKHF_INJECTED) && event.dwExtraInfo == INJECTION_TAG {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+    // Alt chords belong to the system: eating TAB while Alt is held would
+    // block Alt+Tab (and Alt+Esc, Alt+F4) for as long as the picker is open.
+    // Alt-modified keys arrive as WM_SYSKEY* events, while AltGr chords come
+    // through as plain WM_KEYDOWN because the driver reports the paired Ctrl,
+    // so layout-level AltGr typing still captures normally. Modifier keys are
+    // exempt so the captured keyboard state keeps tracking Alt itself, and
+    // shortcut recording keeps the whole chord.
+    if matches!(message, WM_SYSKEYDOWN | WM_SYSKEYUP)
+        && !is_modifier_key(VIRTUAL_KEY(event.vkCode as u16))
+        && !HOOK_STATE.capturing_shortcut.load(Ordering::Acquire)
+    {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
     let hwnd = HWND(HOOK_STATE.hwnd.load(Ordering::Acquire) as *mut c_void);
@@ -1809,6 +1872,16 @@ unsafe fn stop_keyboard_capture(state: &mut AppState) {
     HOOK_STATE.active.store(false, Ordering::Release);
     state.capture_active = false;
     state.pending_commit = None;
+}
+
+/// Shortcut recording needs the whole chord, including Alt-modified keys the
+/// hook otherwise leaves to the system; the flag mirrors into the hook state
+/// so the input thread sees it.
+fn set_capturing_shortcut(state: &mut AppState, value: bool) {
+    state.capturing_shortcut = value;
+    HOOK_STATE
+        .capturing_shortcut
+        .store(value, Ordering::Release);
 }
 
 unsafe extern "system" fn window_proc(
@@ -1984,18 +2057,6 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
-        WM_TIMER if wparam.0 == SCROLL_TIMER_ID => {
-            if state.view == View::Search && state.browsing() {
-                unsafe {
-                    state.tick_browse_scroll();
-                }
-            } else {
-                unsafe {
-                    KillTimer(Some(state.hwnd), SCROLL_TIMER_ID).ok();
-                }
-            }
-            LRESULT(0)
-        }
         WM_TIMER if wparam.0 == PREWARM_TIMER_ID => {
             if !unsafe { prewarm_glyphs(state) } {
                 unsafe {
@@ -2047,8 +2108,8 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_SIZE => {
-            state.render = None;
             unsafe {
+                resize_swapchain(state);
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)
@@ -2098,7 +2159,7 @@ unsafe fn show_picker(
         position_near_cursor(state);
         // Render before showing: the window otherwise appears as an empty
         // frame until the first WM_PAINT lands.
-        let _ = draw_picker(state);
+        render_and_present(state);
         let _ = ShowWindow(state.hwnd, SW_SHOWNOACTIVATE);
         arm_focus_watch(state);
         if let Err(error) = start_keyboard_capture(state) {
@@ -2120,6 +2181,9 @@ unsafe fn arm_focus_watch(state: &AppState) {
 
 unsafe fn hide_picker(state: &mut AppState) {
     state.tone_picker = None;
+    // Land any scroll in flight so the loop never animates a hidden window.
+    state.browse_scroll = state.browse_scroll_target;
+    state.last_frame = None;
     unsafe {
         stop_keyboard_capture(state);
         KillTimer(Some(state.hwnd), FOCUS_TIMER_ID).ok();
@@ -2129,7 +2193,7 @@ unsafe fn hide_picker(state: &mut AppState) {
 
 unsafe fn enter_search(state: &mut AppState) {
     state.view = View::Search;
-    state.capturing_shortcut = false;
+    set_capturing_shortcut(state, false);
     unsafe {
         state.update_results();
         let _ = InvalidateRect(Some(state.hwnd), None, false);
@@ -2157,7 +2221,7 @@ unsafe fn enter_settings(state: &mut AppState) {
     state.status = None;
     state.settings_selected = 0;
     state.selected = 0;
-    state.capturing_shortcut = false;
+    set_capturing_shortcut(state, false);
     unsafe {
         state.sync_accessible_results();
         let _ = InvalidateRect(Some(state.hwnd), None, false);
@@ -2239,7 +2303,7 @@ unsafe fn activate_setting(state: &mut AppState) {
             }
         }
         5 => {
-            state.capturing_shortcut = true;
+            set_capturing_shortcut(state, true);
             state.status = Some("Press the new shortcut".to_string());
         }
         _ => {}
@@ -2637,15 +2701,11 @@ unsafe fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: boo
             return true;
         }
         if key == VK_PRIOR {
-            unsafe {
-                state.scroll_browse(-viewport * 0.88);
-            }
+            state.scroll_browse(-viewport * 0.88);
             return true;
         }
         if key == VK_NEXT {
-            unsafe {
-                state.scroll_browse(viewport * 0.88);
-            }
+            state.scroll_browse(viewport * 0.88);
             return true;
         }
     } else {
@@ -2675,7 +2735,7 @@ unsafe fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: boo
 unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool) -> bool {
     if state.capturing_shortcut {
         if key == VK_ESCAPE {
-            state.capturing_shortcut = false;
+            set_capturing_shortcut(state, false);
             state.status = None;
             unsafe {
                 let _ = InvalidateRect(Some(state.hwnd), None, false);
@@ -2693,7 +2753,7 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
         match Hotkey::from_parts(modifiers, key.0 as u32) {
             Ok(hotkey) => {
                 state.config.hotkey = hotkey;
-                state.capturing_shortcut = false;
+                set_capturing_shortcut(state, false);
                 state.status = None;
                 unsafe {
                     state.sync_accessible_results();
@@ -2742,7 +2802,7 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
         return true;
     }
     if key.0 == 0x20 && state.settings_selected == 5 {
-        state.capturing_shortcut = true;
+        set_capturing_shortcut(state, true);
         state.status = Some("Press the new shortcut".to_string());
         unsafe {
             let _ = InvalidateRect(Some(state.hwnd), None, false);
@@ -3019,9 +3079,7 @@ unsafe fn route_wheel(state: &mut AppState, horizontal: bool, wparam: WPARAM, lp
             state.scroll_categories(-notches * CATEGORY_BUTTON_WIDTH * 2.0);
         }
     } else {
-        unsafe {
-            state.scroll_browse(-notches * 76.0);
-        }
+        state.scroll_browse(-notches * 76.0);
     }
 }
 
@@ -3498,7 +3556,7 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
             state.settings_selected = index;
             state.selected = index;
             if index == 4 {
-                state.capturing_shortcut = true;
+                set_capturing_shortcut(state, true);
                 state.status = Some("Press the new shortcut.".to_string());
             } else if index >= 2 && x >= state.dimensions().0 as f32 * 0.42 {
                 let midpoint = state.dimensions().0 as f32 * 0.7;
@@ -3532,16 +3590,16 @@ unsafe fn paint(state: &mut AppState) {
     let mut paint = PAINTSTRUCT::default();
     unsafe {
         BeginPaint(state.hwnd, &mut paint);
-    }
-    if let Err(error) = unsafe { draw_picker(state) } {
-        state.render = None;
-        eprintln!("winmoji: rendering failed: {error}");
-    }
-    unsafe {
+        render_and_present(state);
         let _ = EndPaint(state.hwnd, &paint);
     }
 }
 
+/// Build the device stack: D3D11 device, DXGI flip-model swap chain with a
+/// frame-latency waitable object, and a D2D device context targeting the
+/// back buffer. Flip-model presentation hands frames to the compositor
+/// without a copy, and the waitable object lets the animation loop pace
+/// itself to the monitor refresh rate instead of a coarse timer.
 unsafe fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> {
     if let Some(resources) = &state.render {
         return Ok(resources.clone());
@@ -3550,33 +3608,95 @@ unsafe fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> 
     unsafe {
         GetClientRect(state.hwnd, &mut client)?;
     }
-    let properties = D2D1_RENDER_TARGET_PROPERTIES {
-        r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-        pixelFormat: D2D1_PIXEL_FORMAT {
-            format: DXGI_FORMAT_UNKNOWN,
-            alphaMode: D2D1_ALPHA_MODE_UNKNOWN,
+
+    let mut device: Option<ID3D11Device> = None;
+    let hardware = unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+    };
+    if hardware.is_err() {
+        device = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                None,
+            )?;
+        }
+    }
+    let device = device.ok_or_else(|| {
+        Error::new(
+            HRESULT(0x80004005u32 as i32),
+            "D3D11CreateDevice returned no device",
+        )
+    })?;
+    let dxgi_device: IDXGIDevice = device.cast()?;
+    let d2d_device = unsafe { state.d2d_factory.CreateDevice(&dxgi_device)? };
+    let context = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)? };
+    unsafe {
+        context.SetDpi(state.dpi as f32, state.dpi as f32);
+    }
+
+    let adapter = unsafe { dxgi_device.GetAdapter()? };
+    let dxgi_factory: IDXGIFactory2 = unsafe { adapter.GetParent()? };
+    let descriptor = DXGI_SWAP_CHAIN_DESC1 {
+        Width: client.right.max(1) as u32,
+        Height: client.bottom.max(1) as u32,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
         },
-        dpiX: state.dpi as f32,
-        dpiY: state.dpi as f32,
-        usage: D2D1_RENDER_TARGET_USAGE_NONE,
-        minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+        BufferCount: 2,
+        Scaling: DXGI_SCALING_NONE,
+        SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+        Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
+        ..Default::default()
     };
-    let window_properties = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-        hwnd: state.hwnd,
-        pixelSize: D2D_SIZE_U {
-            width: client.right.max(1) as u32,
-            height: client.bottom.max(1) as u32,
-        },
-        presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
+    let swapchain: IDXGISwapChain2 = unsafe {
+        dxgi_factory
+            .CreateSwapChainForHwnd(&device, state.hwnd, &descriptor, None, None)?
+            .cast()?
     };
-    let target = unsafe {
-        state
-            .d2d_factory
-            .CreateHwndRenderTarget(&properties, &window_properties)?
-    };
+    unsafe {
+        // Alt chords pass through the keyboard hook to the system; keep DXGI
+        // from claiming Alt+Enter for a fullscreen toggle.
+        let _ = dxgi_factory.MakeWindowAssociation(
+            state.hwnd,
+            DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES,
+        );
+        swapchain.SetMaximumFrameLatency(1)?;
+    }
+    let frame_gate = Rc::new(FrameLatencyGate(unsafe {
+        swapchain.GetFrameLatencyWaitableObject()
+    }));
+    unsafe {
+        attach_swapchain_target(&context, &swapchain, state.dpi)?;
+    }
+    let target: ID2D1RenderTarget = context.cast()?;
     let brushes = unsafe { create_brushes(&target)? };
     let resources = RenderResources {
         target,
+        context,
+        swapchain,
+        frame_gate,
         brushes,
         glyphs: Rc::new(RefCell::new(HashMap::new())),
         cold_budget: Rc::new(std::cell::Cell::new(0)),
@@ -3590,6 +3710,109 @@ unsafe fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> 
         let _ = SetTimer(Some(state.hwnd), PREWARM_TIMER_ID, PREWARM_FRAME_MS, None);
     }
     Ok(resources)
+}
+
+/// Point the device context at the swap chain's current back buffer.
+unsafe fn attach_swapchain_target(
+    context: &ID2D1DeviceContext,
+    swapchain: &IDXGISwapChain2,
+    dpi: u32,
+) -> Result<()> {
+    let surface: IDXGISurface = unsafe { swapchain.GetBuffer(0)? };
+    let properties = D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: dpi as f32,
+        dpiY: dpi as f32,
+        bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        ..Default::default()
+    };
+    let bitmap = unsafe { context.CreateBitmapFromDxgiSurface(&surface, Some(&properties))? };
+    unsafe {
+        context.SetTarget(&bitmap);
+    }
+    Ok(())
+}
+
+/// Resize the swap chain to the current client area, keeping the device and
+/// the glyph cache alive; only the back-buffer binding is rebuilt.
+unsafe fn resize_swapchain(state: &mut AppState) {
+    let Some(resources) = state.render.clone() else {
+        return;
+    };
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(state.hwnd, &mut client) }.is_err() {
+        return;
+    }
+    unsafe {
+        resources.context.SetTarget(None);
+        if resources
+            .swapchain
+            .ResizeBuffers(
+                0,
+                client.right.max(1) as u32,
+                client.bottom.max(1) as u32,
+                DXGI_FORMAT_UNKNOWN,
+                DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+            )
+            .is_err()
+            || attach_swapchain_target(&resources.context, &resources.swapchain, state.dpi)
+                .is_err()
+        {
+            state.render = None;
+        }
+    }
+}
+
+/// Draw the current view and hand the frame to the compositor. Present(1)
+/// queues at most one frame (SetMaximumFrameLatency), so this never blocks
+/// the thread for more than a frame even without the waitable gate.
+unsafe fn render_and_present(state: &mut AppState) {
+    if let Err(error) = unsafe { draw_picker(state) } {
+        state.render = None;
+        eprintln!("winmoji: rendering failed: {error}");
+        return;
+    }
+    if let Some(resources) = &state.render {
+        let presented = unsafe { resources.swapchain.Present(1, DXGI_PRESENT(0)) };
+        if presented.is_err() {
+            // Device removed or reset: rebuild the stack on the next frame.
+            state.render = None;
+            unsafe {
+                let _ = InvalidateRect(Some(state.hwnd), None, false);
+            }
+        }
+    }
+}
+
+/// One vsync-paced animation frame: wait until the compositor can take a new
+/// frame, advance the scroll by the elapsed wall-clock time, and render. The
+/// wait is bounded so a stalled compositor never wedges the loop.
+unsafe fn render_animation_frame(state: &mut AppState) {
+    if unsafe { ensure_render_target(state) }.is_err() {
+        // No device: snap to the destination instead of spinning.
+        state.browse_scroll = state.browse_scroll_target;
+        state.last_frame = None;
+        return;
+    }
+    if let Some(resources) = &state.render {
+        unsafe {
+            let _ = WaitForSingleObject(resources.frame_gate.0, 33);
+        }
+    }
+    let now = Instant::now();
+    let dt = state
+        .last_frame
+        .map_or(1.0 / 120.0, |last| {
+            now.duration_since(last).as_secs_f32().clamp(0.001, 0.05)
+        });
+    state.last_frame = Some(now);
+    unsafe {
+        state.tick_browse_scroll(dt);
+        render_and_present(state);
+    }
 }
 
 unsafe fn glyph_bitmap(
@@ -3916,7 +4139,7 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
 /// is rendered directly instead.
 unsafe fn draw_search_text(
     state: &mut AppState,
-    target: &ID2D1HwndRenderTarget,
+    target: &ID2D1RenderTarget,
     brushes: &Brushes,
 ) -> Result<()> {
     let (width, _) = state.dimensions();
@@ -4552,7 +4775,7 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
 }
 
 unsafe fn draw_header_button(
-    target: &ID2D1HwndRenderTarget,
+    target: &ID2D1RenderTarget,
     state: &AppState,
     width: i32,
     position: usize,
@@ -4586,7 +4809,7 @@ unsafe fn draw_header_button(
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn draw_button(
-    target: &ID2D1HwndRenderTarget,
+    target: &ID2D1RenderTarget,
     bounds: D2D_RECT_F,
     label: &str,
     hovered: bool,
@@ -4617,7 +4840,7 @@ unsafe fn draw_button(
     }
 }
 
-unsafe fn draw_tone_picker(state: &AppState, target: &ID2D1HwndRenderTarget, brushes: &Brushes) {
+unsafe fn draw_tone_picker(state: &AppState, target: &ID2D1RenderTarget, brushes: &Brushes) {
     let Some(picker) = &state.tone_picker else {
         return;
     };
@@ -4680,7 +4903,7 @@ unsafe fn draw_tone_picker(state: &AppState, target: &ID2D1HwndRenderTarget, bru
 
 unsafe fn draw_hover_help(
     state: &AppState,
-    target: &ID2D1HwndRenderTarget,
+    target: &ID2D1RenderTarget,
     surface: &ID2D1SolidColorBrush,
     border: &ID2D1SolidColorBrush,
     text: &ID2D1SolidColorBrush,
@@ -4764,7 +4987,7 @@ unsafe fn draw_hover_help(
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn draw_slider(
-    target: &ID2D1HwndRenderTarget,
+    target: &ID2D1RenderTarget,
     bounds: D2D_RECT_F,
     value: i32,
     minimum: i32,
@@ -4911,7 +5134,7 @@ unsafe fn draw_glyph(
 
 unsafe fn draw_entry_information(
     state: &AppState,
-    target: &ID2D1HwndRenderTarget,
+    target: &ID2D1RenderTarget,
     bounds: D2D_RECT_F,
     brush: &ID2D1SolidColorBrush,
 ) {
@@ -4952,7 +5175,7 @@ unsafe fn draw_entry_information(
     }
 }
 
-unsafe fn solid_brush(target: &ID2D1HwndRenderTarget, value: u32) -> Result<ID2D1SolidColorBrush> {
+unsafe fn solid_brush(target: &ID2D1RenderTarget, value: u32) -> Result<ID2D1SolidColorBrush> {
     unsafe { target.CreateSolidColorBrush(&color(value), None) }
 }
 
@@ -5016,8 +5239,12 @@ fn scale(value: i32, dpi: u32) -> i32 {
     value * dpi as i32 / 96
 }
 
-fn smooth_scroll_step(current: f32, target: f32) -> f32 {
-    current + (target - current) * 0.24
+/// Frame-rate-independent exponential approach: the same fraction of the
+/// remaining distance is covered per unit of wall-clock time regardless of
+/// how many frames the monitor delivers in that time.
+fn smooth_scroll_step(current: f32, target: f32, dt: f32) -> f32 {
+    const RATE: f32 = 17.0;
+    current + (target - current) * (1.0 - (-dt * RATE).exp())
 }
 
 fn to_wide(value: &str) -> Vec<u16> {
@@ -5661,13 +5888,26 @@ mod tests {
 
     #[test]
     fn smooth_scroll_moves_by_sub_row_increments_and_converges() {
-        let first = smooth_scroll_step(0.0, 76.0);
+        const FRAME: f32 = 1.0 / 60.0;
+        let first = smooth_scroll_step(0.0, 76.0, FRAME);
         assert!(first > 0.0 && first < GRID_CELL as f32);
         let mut position = first;
         for _ in 0..40 {
-            position = smooth_scroll_step(position, 76.0);
+            position = smooth_scroll_step(position, 76.0, FRAME);
         }
         assert!((76.0 - position).abs() < 0.01);
+    }
+
+    #[test]
+    fn smooth_scroll_speed_is_frame_rate_independent() {
+        // One 60Hz step covers the same distance as two 120Hz steps.
+        let coarse = smooth_scroll_step(0.0, 100.0, 1.0 / 60.0);
+        let fine = smooth_scroll_step(
+            smooth_scroll_step(0.0, 100.0, 1.0 / 120.0),
+            100.0,
+            1.0 / 120.0,
+        );
+        assert!((coarse - fine).abs() < 0.001);
     }
 
     #[test]
