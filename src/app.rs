@@ -1,9 +1,12 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
@@ -12,15 +15,18 @@ use windows::Win32::Foundation::{
     LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_UNKNOWN, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_ALPHA_MODE_UNKNOWN,
+    D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
-    D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1RenderTarget,
+    ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -34,7 +40,7 @@ use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromPoint, PAINTSTRUCT, ScreenToClient,
@@ -139,8 +145,12 @@ const VK_L_VALUE: u16 = 0x4c;
 const VK_OEM_COMMA_VALUE: u16 = 0xbc;
 const SCROLL_TIMER_ID: usize = 0x0057_4d01;
 const FOCUS_TIMER_ID: usize = 0x0057_4d02;
+const PREWARM_TIMER_ID: usize = 0x0057_4d03;
 const SCROLL_FRAME_MS: u32 = 16;
 const FOCUS_FRAME_MS: u32 = 100;
+const PREWARM_FRAME_MS: u32 = 24;
+const PREWARM_CHUNK: usize = 16;
+const GLYPH_TILE: f32 = 44.0;
 
 static ACTIVE_PICKER: AtomicPtr<AppState> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -687,9 +697,21 @@ struct AppState {
     status: Option<String>,
     d2d_factory: ID2D1Factory,
     dwrite_factory: IDWriteFactory,
-    render: Option<(ID2D1HwndRenderTarget, Brushes)>,
+    render: Option<RenderResources>,
+    prewarm_cursor: usize,
     formats: TextFormats,
     keep_visible: bool,
+}
+
+/// Device-bound rendering state: the swap target, the brush set, and the
+/// per-entry glyph bitmap cache. Color emoji rasterization costs several
+/// milliseconds per glyph; each glyph renders once into a small bitmap and
+/// every later frame blits it. All of this dies together on device loss.
+#[derive(Clone)]
+struct RenderResources {
+    target: ID2D1HwndRenderTarget,
+    brushes: Brushes,
+    glyphs: Rc<RefCell<HashMap<usize, Option<ID2D1Bitmap>>>>,
 }
 
 #[derive(Clone)]
@@ -766,6 +788,7 @@ impl AppState {
             d2d_factory,
             dwrite_factory,
             render: None,
+            prewarm_cursor: 0,
             formats,
             keep_visible,
         };
@@ -1070,6 +1093,13 @@ impl AppState {
     }
 
     unsafe fn tick_browse_scroll(&mut self) {
+        // Long jumps teleport to within one viewport of the destination so
+        // the animation never renders the entire catalog in between.
+        let viewport = (self.footer_top() - BROWSE_CONTENT_TOP).max(1) as f32;
+        let span = self.browse_scroll_target - self.browse_scroll;
+        if span.abs() > viewport * 2.0 {
+            self.browse_scroll = self.browse_scroll_target - viewport * span.signum();
+        }
         let distance = self.browse_scroll_target - self.browse_scroll;
         if distance.abs() < 0.35 {
             self.browse_scroll = self.browse_scroll_target;
@@ -1772,6 +1802,9 @@ unsafe extern "system" fn window_proc(
                     SetLayeredWindowAttributes(state.accessible_results, COLORREF(0), 0, LWA_ALPHA);
                 set_accessible_name(state.accessible_results, w!("Search results"));
                 state.sync_accessible_results();
+                // Start filling the glyph cache while the window is still
+                // hidden so the first open paints instantly.
+                let _ = SetTimer(Some(hwnd), PREWARM_TIMER_ID, PREWARM_FRAME_MS, None);
             }
             LRESULT(0)
         }
@@ -1885,6 +1918,14 @@ unsafe extern "system" fn window_proc(
             } else {
                 unsafe {
                     KillTimer(Some(state.hwnd), SCROLL_TIMER_ID).ok();
+                }
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == PREWARM_TIMER_ID => {
+            if !unsafe { prewarm_glyphs(state) } {
+                unsafe {
+                    KillTimer(Some(hwnd), PREWARM_TIMER_ID).ok();
                 }
             }
             LRESULT(0)
@@ -3280,9 +3321,9 @@ unsafe fn paint(state: &mut AppState) {
     }
 }
 
-unsafe fn ensure_render_target(state: &mut AppState) -> Result<(ID2D1HwndRenderTarget, Brushes)> {
-    if let Some((target, brushes)) = &state.render {
-        return Ok((target.clone(), brushes.clone()));
+unsafe fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> {
+    if let Some(resources) = &state.render {
+        return Ok(resources.clone());
     }
     let mut client = RECT::default();
     unsafe {
@@ -3313,8 +3354,112 @@ unsafe fn ensure_render_target(state: &mut AppState) -> Result<(ID2D1HwndRenderT
             .CreateHwndRenderTarget(&properties, &window_properties)?
     };
     let brushes = unsafe { create_brushes(&target)? };
-    state.render = Some((target.clone(), brushes.clone()));
-    Ok((target, brushes))
+    let resources = RenderResources {
+        target,
+        brushes,
+        glyphs: Rc::new(RefCell::new(HashMap::new())),
+    };
+    state.render = Some(resources.clone());
+    // A fresh device means an empty glyph cache; refill it during idle time
+    // so opening and scrolling never wait on cold emoji rasterization.
+    state.prewarm_cursor = 0;
+    unsafe {
+        let _ = SetTimer(Some(state.hwnd), PREWARM_TIMER_ID, PREWARM_FRAME_MS, None);
+    }
+    Ok(resources)
+}
+
+unsafe fn glyph_bitmap(
+    state: &AppState,
+    resources: &RenderResources,
+    entry_index: usize,
+) -> Option<ID2D1Bitmap> {
+    if let Some(cached) = resources.glyphs.borrow().get(&entry_index) {
+        return cached.clone();
+    }
+    let created = unsafe { render_glyph_bitmap(state, resources, entry_index) }.ok();
+    resources
+        .glyphs
+        .borrow_mut()
+        .insert(entry_index, created.clone());
+    created
+}
+
+unsafe fn render_glyph_bitmap(
+    state: &AppState,
+    resources: &RenderResources,
+    entry_index: usize,
+) -> Result<ID2D1Bitmap> {
+    let entry = &catalog::entries()[entry_index];
+    let size = D2D_SIZE_F {
+        width: GLYPH_TILE,
+        height: GLYPH_TILE,
+    };
+    let format = D2D1_PIXEL_FORMAT {
+        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+    };
+    let compatible = unsafe {
+        resources.target.CreateCompatibleRenderTarget(
+            Some(&size),
+            None,
+            Some(&format),
+            D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+        )?
+    };
+    unsafe {
+        compatible.BeginDraw();
+        compatible.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }));
+        draw_text(
+            &compatible,
+            &entry.glyph,
+            &state.formats.glyph,
+            rect(0.0, 0.0, GLYPH_TILE, GLYPH_TILE),
+            &resources.brushes.primary,
+            D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+        );
+        compatible.EndDraw(None, None)?;
+        compatible.GetBitmap()
+    }
+}
+
+/// Warm a slice of the glyph cache; returns false once the queue is drained.
+unsafe fn prewarm_glyphs(state: &mut AppState) -> bool {
+    if state.config.emoji_font != EmojiFont::SegoeEmoji {
+        return false;
+    }
+    let Ok(resources) = (unsafe { ensure_render_target(state) }) else {
+        return false;
+    };
+    let mut warmed = 0;
+    while warmed < PREWARM_CHUNK {
+        let mut position = state.prewarm_cursor;
+        let mut entry_index = None;
+        for section in &state.browse_sections {
+            if position < section.indices.len() {
+                entry_index = Some(section.indices[position]);
+                break;
+            }
+            position -= section.indices.len();
+        }
+        let Some(entry_index) = entry_index else {
+            return false;
+        };
+        state.prewarm_cursor += 1;
+        let entry = &catalog::entries()[entry_index];
+        if entry.kind == "Emoji" && !resources.glyphs.borrow().contains_key(&entry_index) {
+            unsafe {
+                glyph_bitmap(state, &resources, entry_index);
+            }
+            warmed += 1;
+        }
+    }
+    true
 }
 
 unsafe fn draw_picker(state: &mut AppState) -> Result<()> {
@@ -3325,7 +3470,9 @@ unsafe fn draw_picker(state: &mut AppState) -> Result<()> {
 }
 
 unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
-    let (target, brushes) = unsafe { ensure_render_target(state)? };
+    let resources = unsafe { ensure_render_target(state)? };
+    let target = resources.target.clone();
+    let brushes = resources.brushes.clone();
     let (width, height) = state.dimensions();
     let footer_top = state.footer_top() as f32;
 
@@ -3430,7 +3577,7 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
         unsafe {
             draw_browser(
                 state,
-                &target,
+                &resources,
                 &brushes.surface,
                 &brushes.surface_border,
                 &brushes.selection,
@@ -3445,7 +3592,7 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
         unsafe {
             draw_search_results(
                 state,
-                &target,
+                &resources,
                 &brushes.selection,
                 &brushes.selection_border,
                 &brushes.glyph_surface,
@@ -3623,7 +3770,7 @@ unsafe fn layout_caret_x(layout: &IDWriteTextLayout, position: u32) -> Result<f3
 #[allow(clippy::too_many_arguments)]
 unsafe fn draw_browser(
     state: &AppState,
-    target: &ID2D1HwndRenderTarget,
+    resources: &RenderResources,
     surface: &ID2D1SolidColorBrush,
     border: &ID2D1SolidColorBrush,
     selection: &ID2D1SolidColorBrush,
@@ -3633,6 +3780,7 @@ unsafe fn draw_browser(
     secondary: &ID2D1SolidColorBrush,
     accent: &ID2D1SolidColorBrush,
 ) {
+    let target = &resources.target;
     let (width, _) = state.dimensions();
     let category_viewport = category_viewport(width);
     unsafe {
@@ -3779,7 +3927,6 @@ unsafe fn draw_browser(
                 Some(HitTarget::BrowseItem { section, item })
                     if section == section_index && item == item_index
             );
-            let entry = &catalog::entries()[entry_index];
             unsafe {
                 let tile = rounded_rect(
                     left + 3.0,
@@ -3805,7 +3952,7 @@ unsafe fn draw_browser(
                     left + layout.cell_width - 5.0,
                     top + layout.cell_height as f32 - 3.0,
                 );
-                draw_glyph(state, target, entry, glyph_bounds, primary);
+                draw_glyph(state, resources, entry_index, glyph_bounds, primary);
             }
         }
     }
@@ -3841,7 +3988,7 @@ unsafe fn draw_browser(
 #[allow(clippy::too_many_arguments)]
 unsafe fn draw_search_results(
     state: &AppState,
-    target: &ID2D1HwndRenderTarget,
+    resources: &RenderResources,
     selection: &ID2D1SolidColorBrush,
     selection_border: &ID2D1SolidColorBrush,
     glyph_surface: &ID2D1SolidColorBrush,
@@ -3849,6 +3996,7 @@ unsafe fn draw_search_results(
     secondary: &ID2D1SolidColorBrush,
     accent: &ID2D1SolidColorBrush,
 ) {
+    let target = &resources.target;
     let (width, _) = state.dimensions();
     for (row, found) in state.matches.iter().enumerate() {
         let top = (SEARCH_RESULTS_TOP + row as i32 * RESULT_ROW_HEIGHT) as f32;
@@ -3896,8 +4044,8 @@ unsafe fn draw_search_results(
             );
             draw_glyph(
                 state,
-                target,
-                entry,
+                resources,
+                found.index,
                 rect(22.0, top + 2.0, 52.0, top + RESULT_ROW_HEIGHT as f32 - 2.0),
                 primary,
             );
@@ -3946,7 +4094,9 @@ unsafe fn draw_search_results(
 }
 
 unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
-    let (target, brushes) = unsafe { ensure_render_target(state)? };
+    let resources = unsafe { ensure_render_target(state)? };
+    let target = resources.target.clone();
+    let brushes = resources.brushes.clone();
     let (width, height) = state.dimensions();
     let footer_top = state.footer_top() as f32;
     let border = brushes.surface_border.clone();
@@ -4362,11 +4512,38 @@ unsafe fn draw_slider(
 
 unsafe fn draw_glyph(
     state: &AppState,
-    target: &ID2D1HwndRenderTarget,
-    entry: &catalog::Entry,
+    resources: &RenderResources,
+    entry_index: usize,
     bounds: D2D_RECT_F,
     brush: &ID2D1SolidColorBrush,
 ) {
+    let target = &resources.target;
+    let entry = &catalog::entries()[entry_index];
+    if entry.kind == "Emoji" && state.config.emoji_font == EmojiFont::SegoeEmoji {
+        // Fast path: blit the cached bitmap instead of rasterizing the
+        // color glyph again.
+        if let Some(bitmap) = unsafe { glyph_bitmap(state, resources, entry_index) } {
+            let side = (bounds.right - bounds.left).min(bounds.bottom - bounds.top);
+            let center_x = (bounds.left + bounds.right) / 2.0;
+            let center_y = (bounds.top + bounds.bottom) / 2.0;
+            let destination = rect(
+                center_x - side / 2.0,
+                center_y - side / 2.0,
+                center_x + side / 2.0,
+                center_y + side / 2.0,
+            );
+            unsafe {
+                target.DrawBitmap(
+                    &bitmap,
+                    Some(&destination),
+                    1.0,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    None,
+                );
+            }
+            return;
+        }
+    }
     if entry.kind == "Emoticon" {
         // Wide emoticons drop to a smaller face and clip to their tile
         // instead of spilling into the neighbours.
@@ -4485,7 +4662,7 @@ fn rounded_rect(left: f32, top: f32, right: f32, bottom: f32, radius: f32) -> D2
 }
 
 unsafe fn draw_text(
-    target: &ID2D1HwndRenderTarget,
+    target: &ID2D1RenderTarget,
     text: &str,
     format: &IDWriteTextFormat,
     bounds: D2D_RECT_F,
