@@ -18,7 +18,8 @@ Run `winmoji.exe` to show the picker. The default global shortcut is `Ctrl+Shift
 - Press Ctrl+Enter to insert the selected text and close the picker.
 - Clear the search or press Ctrl+G to browse the continuously scrolling catalog in the same window.
 - Emoji follow the Unicode CLDR groups for smileys, people, animals, food, travel, activities, objects, and flags. One Symbols group contains emoji symbols plus the broad Unicode symbol catalog, followed by a dedicated Emoticons group.
-- In the grid, use arrow keys to move, Ctrl+H or Ctrl+L to change category, Page Up or Page Down to scroll, the mouse wheel to browse smoothly, or click a category button to jump. The category rail scrolls with a vertical or horizontal wheel or trackpad gesture while hovering it, with its edge buttons, or by clicking.
+- In the grid, use the arrow keys or Ctrl+H, Ctrl+J, Ctrl+K, and Ctrl+L to move, Page Up and Page Down or Ctrl+U and Ctrl+D to scroll by pages, the mouse wheel to browse smoothly, or click a category button to jump. The category rail scrolls with a vertical or horizontal wheel or trackpad gesture while hovering it, with its edge buttons, or by clicking.
+- Right-click an emoji that supports skin tones to pick a variant for a single insert. The permanent default tone is a settings row and applies to display and inserts everywhere.
 - Drag the scrollbar for direct continuous positioning. Category focus follows the visible section while scrolling.
 - Grid rows are rendered on demand for the visible viewport, so large categories do not create work for offscreen emoji during scrolling.
 - Hover or focus a character to show its configured name, code point, and type in the footer.
@@ -41,13 +42,14 @@ width = 440
 height = 380
 details = "both"
 emoji_font = "Segoe UI Emoji"
+skin_tone = "default"
 ```
 
 Supported modifiers are `Ctrl`, `Alt`, `Shift`, and `Win`. The key can be a letter, digit, `F1` through `F24`, `Space`, `Enter`, `Tab`, `Escape`, or common punctuation. Punctuation accepts its literal form or the names `period`, `comma`, `slash`, `backslash`, `semicolon`, `apostrophe`, `minus`, `equals`, `left bracket`, `right bracket`, and `grave`. The configured shortcut always uses `MOD_NOREPEAT`.
 
-`width` accepts 360 through 920. `height` accepts 300 through 760. Values are clamped to the active monitor work area. `details` accepts `none`, `type`, `codepoint`, or `both`. `emoji_font` accepts `Segoe UI Emoji` or `Segoe UI Symbol`.
+`width` accepts 360 through 920. `height` accepts 300 through 760. Values are clamped to the active monitor work area. `details` accepts `none`, `type`, `codepoint`, or `both`. `emoji_font` accepts `Segoe UI Emoji` or `Segoe UI Symbol`. `skin_tone` accepts `default`, `light`, `medium-light`, `medium`, `medium-dark`, or `dark`.
 
-The settings panel changes all of these values without editing the file. Escape and Enter save and return to the picker. Discard restores the values from when settings opened. Reset restores stock defaults and keeps settings open for inspection.
+The settings panel changes all of these values without editing the file. Enter changes the focused value with wrap-around, and value changes preview immediately. Escape and the Back button save and return to the picker. Discard restores the values from when settings opened. Reset restores stock defaults and keeps settings open for inspection.
 
 ## Start with Windows
 

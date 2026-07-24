@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 
 use unicode_general_category::{GeneralCategory, get_general_category};
 
+use crate::config::SkinTone;
+
 const MAX_FUZZY_WORD_BYTES: usize = 48;
 const MAX_QUERY_TOKENS: usize = 8;
 const EMOTICONS: &[(&str, &str, &str)] = &[
@@ -57,6 +59,29 @@ static CATALOG: OnceLock<Vec<Entry>> = OnceLock::new();
 
 pub fn entries() -> &'static [Entry] {
     CATALOG.get_or_init(build_catalog)
+}
+
+/// Resolve the skin tone variant of a glyph. `None` means the glyph has no
+/// variant for the requested tone (or the tone is the default), so the
+/// original glyph applies.
+pub fn toned(glyph: &str, tone: SkinTone) -> Option<&'static str> {
+    let target = match tone {
+        SkinTone::Default => return None,
+        SkinTone::Light => emojis::SkinTone::Light,
+        SkinTone::MediumLight => emojis::SkinTone::MediumLight,
+        SkinTone::Medium => emojis::SkinTone::Medium,
+        SkinTone::MediumDark => emojis::SkinTone::MediumDark,
+        SkinTone::Dark => emojis::SkinTone::Dark,
+    };
+    let toned = emojis::get(glyph)?.with_skin_tone(target)?;
+    (toned.as_str() != glyph).then(|| toned.as_str())
+}
+
+/// Whether a glyph has selectable skin tone variants.
+pub fn supports_tones(glyph: &str) -> bool {
+    emojis::get(glyph)
+        .and_then(|emoji| emoji.skin_tones())
+        .is_some_and(|mut tones| tones.nth(1).is_some())
 }
 
 pub fn search(query: &str, limit: usize) -> Vec<Match> {
@@ -610,5 +635,15 @@ mod tests {
     fn caps_result_count() {
         assert_eq!(search("arrow", 8).len(), 8);
         assert!(search("arrow", 0).is_empty());
+    }
+
+    #[test]
+    fn resolves_skin_tone_variants() {
+        assert_eq!(toned("👋", SkinTone::Medium), Some("👋🏽"));
+        assert_eq!(toned("👋", SkinTone::Default), None);
+        assert_eq!(toned("😀", SkinTone::Dark), None);
+        assert!(supports_tones("👋"));
+        assert!(!supports_tones("😀"));
+        assert!(!supports_tones("→"));
     }
 }

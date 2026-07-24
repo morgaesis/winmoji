@@ -258,11 +258,72 @@ impl fmt::Display for EmojiFont {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SkinTone {
+    #[default]
+    Default,
+    Light,
+    MediumLight,
+    Medium,
+    MediumDark,
+    Dark,
+}
+
+impl SkinTone {
+    pub const ALL: [Self; 6] = [
+        Self::Default,
+        Self::Light,
+        Self::MediumLight,
+        Self::Medium,
+        Self::MediumDark,
+        Self::Dark,
+    ];
+
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|tone| *tone == self).unwrap_or(0)
+    }
+
+    pub fn next(self, delta: isize) -> Self {
+        let next = self.index().saturating_add_signed(delta);
+        Self::ALL[next.min(Self::ALL.len() - 1)]
+    }
+
+    pub fn cycled(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "default" | "none" | "yellow" => Ok(Self::Default),
+            "light" => Ok(Self::Light),
+            "medium-light" | "medium light" => Ok(Self::MediumLight),
+            "medium" => Ok(Self::Medium),
+            "medium-dark" | "medium dark" => Ok(Self::MediumDark),
+            "dark" => Ok(Self::Dark),
+            other => Err(format!("unsupported skin tone: {other}")),
+        }
+    }
+}
+
+impl fmt::Display for SkinTone {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Default => "Default",
+            Self::Light => "Light",
+            Self::MediumLight => "Medium-light",
+            Self::Medium => "Medium",
+            Self::MediumDark => "Medium-dark",
+            Self::Dark => "Dark",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Config {
     pub hotkey: Hotkey,
     pub dimensions: PickerDimensions,
     pub details: DetailMode,
     pub emoji_font: EmojiFont,
+    pub skin_tone: SkinTone,
 }
 
 pub fn config_path() -> io::Result<PathBuf> {
@@ -340,6 +401,7 @@ fn parse_config(content: &str) -> Result<Config, String> {
             }
             "details" => config.details = DetailMode::parse(value)?,
             "emoji_font" => config.emoji_font = EmojiFont::parse(value)?,
+            "skin_tone" => config.skin_tone = SkinTone::parse(value)?,
             _ => {}
         }
     }
@@ -356,12 +418,13 @@ pub fn save_config(config: Config) -> Result<(), String> {
         .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     let dimensions = config.dimensions.clamped();
     let content = format!(
-        "hotkey = \"{}\"\nwidth = {}\nheight = {}\ndetails = \"{}\"\nemoji_font = \"{}\"\n",
+        "hotkey = \"{}\"\nwidth = {}\nheight = {}\ndetails = \"{}\"\nemoji_font = \"{}\"\nskin_tone = \"{}\"\n",
         config.hotkey,
         dimensions.width,
         dimensions.height,
         config.details.to_string().to_ascii_lowercase(),
         config.emoji_font,
+        config.skin_tone.to_string().to_ascii_lowercase(),
     );
     fs::write(&path, content)
         .map_err(|error| format!("failed to write {}: {error}", path.display()))

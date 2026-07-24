@@ -107,7 +107,8 @@ use crate::catalog::{self, Match};
 use crate::config::{
     Config, DetailMode, EmojiFont, Hotkey, MAX_PICKER_HEIGHT, MAX_PICKER_WIDTH, MIN_PICKER_HEIGHT,
     MIN_PICKER_WIDTH, MOD_ALT_VALUE, MOD_CONTROL_VALUE, MOD_NOREPEAT_VALUE, MOD_SHIFT_VALUE,
-    MOD_WIN_VALUE, PickerDimensions, load_config, load_recents, remember_recent, save_config,
+    MOD_WIN_VALUE, PickerDimensions, SkinTone, load_config, load_recents, remember_recent,
+    save_config,
 };
 
 const CLASS_NAME: PCWSTR = w!("WinMojiPickerWindow");
@@ -300,6 +301,16 @@ struct SectionLayout {
     cell_height: i32,
 }
 
+/// One-time skin tone chooser opened by right-clicking an emoji that has
+/// variants. A pick inserts that variant once; the permanent default lives
+/// in settings.
+#[derive(Clone, Copy, Debug)]
+struct TonePicker {
+    entry_index: usize,
+    anchor_x: f32,
+    anchor_y: f32,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Slider {
     Width,
@@ -320,6 +331,8 @@ enum HitTarget {
     BrowseScrollbar,
     Insert,
     InsertClose,
+    ToneOption(usize),
+    TonePopup,
     SettingRow(usize),
     WidthSlider,
     HeightSlider,
@@ -479,14 +492,21 @@ unsafe fn build_displayable_entry_index(factory: &IDWriteFactory) -> Result<Vec<
     Ok(catalog::entries()
         .iter()
         .map(|entry| {
-            if entry.kind == "Emoji" || entry.kind == "Emoticon" {
+            if entry.kind == "Emoticon" {
                 return true;
             }
-            entry.glyph.chars().all(|character| {
-                faces
-                    .iter()
-                    .any(|face| unsafe { font_face_has_character(face, character) })
-            })
+            // Joiners and variation selectors shape sequences and have no
+            // standalone glyph requirement; every other code point must be
+            // covered or the entry renders as a placeholder box.
+            entry
+                .glyph
+                .chars()
+                .filter(|character| !matches!(*character as u32, 0xfe0f | 0x200d))
+                .all(|character| {
+                    faces
+                        .iter()
+                        .any(|face| unsafe { font_face_has_character(face, character) })
+                })
         })
         .collect())
 }
@@ -682,6 +702,7 @@ struct AppState {
     active_category: usize,
     hovered_entry: Option<usize>,
     hovered_target: Option<HitTarget>,
+    tone_picker: Option<TonePicker>,
     settings_selected: usize,
     settings_original: Config,
     dragging_slider: Option<Slider>,
@@ -707,11 +728,14 @@ struct AppState {
 /// per-entry glyph bitmap cache. Color emoji rasterization costs several
 /// milliseconds per glyph; each glyph renders once into a small bitmap and
 /// every later frame blits it. All of this dies together on device loss.
+/// Cache key: catalog entry index plus the applied skin tone ordinal.
+type GlyphCache = HashMap<(usize, u8), Option<ID2D1Bitmap>>;
+
 #[derive(Clone)]
 struct RenderResources {
     target: ID2D1HwndRenderTarget,
     brushes: Brushes,
-    glyphs: Rc<RefCell<HashMap<usize, Option<ID2D1Bitmap>>>>,
+    glyphs: Rc<RefCell<GlyphCache>>,
 }
 
 #[derive(Clone)]
@@ -772,6 +796,7 @@ impl AppState {
             active_category: 0,
             hovered_entry: None,
             hovered_target: None,
+            tone_picker: None,
             settings_selected: 0,
             settings_original: config,
             dragging_slider: None,
@@ -829,6 +854,7 @@ impl AppState {
     }
 
     unsafe fn update_results(&mut self) {
+        self.tone_picker = None;
         self.matches = if self.browsing() {
             Vec::new()
         } else {
@@ -1236,6 +1262,7 @@ impl AppState {
                 format!("Height, {}", self.config.dimensions.height),
                 format!("Hover details, {}", self.config.details),
                 format!("Emoji font, {}", self.config.emoji_font),
+                format!("Skin tone, {}", self.config.skin_tone),
                 format!("Open shortcut, {}", self.config.hotkey),
             ],
         };
@@ -1270,11 +1297,6 @@ impl AppState {
                 None,
             );
         }
-    }
-
-    fn selected_text(&self) -> Option<&str> {
-        self.selected_entry_index()
-            .map(|index| catalog::entries()[index].glyph.as_str())
     }
 }
 
@@ -1842,7 +1864,7 @@ unsafe extern "system" fn window_proc(
                 let item_count = match state.view {
                     View::Search if browsing => visible_browse.as_ref().map_or(0, Vec::len),
                     View::Search => state.matches.len(),
-                    View::Settings => 5,
+                    View::Settings => 6,
                 };
                 if selected >= 0 && (selected as usize) < item_count {
                     if browsing {
@@ -1853,7 +1875,7 @@ unsafe extern "system" fn window_proc(
                         state.selected = selected as usize;
                     }
                     if state.view == View::Settings {
-                        state.settings_selected = state.selected.min(4);
+                        state.settings_selected = state.selected.min(5);
                     }
                     unsafe {
                         let _ = InvalidateRect(Some(state.hwnd), None, false);
@@ -1901,6 +1923,13 @@ unsafe extern "system" fn window_proc(
                         state.sync_accessible_results();
                     }
                 }
+            }
+            LRESULT(0)
+        }
+        WM_RBUTTONDOWN => {
+            let (x, y) = mouse_point_dip(lparam, state.dpi);
+            unsafe {
+                open_tone_picker(state, x, y);
             }
             LRESULT(0)
         }
@@ -2042,6 +2071,7 @@ unsafe fn arm_focus_watch(state: &AppState) {
 }
 
 unsafe fn hide_picker(state: &mut AppState) {
+    state.tone_picker = None;
     unsafe {
         stop_keyboard_capture(state);
         KillTimer(Some(state.hwnd), FOCUS_TIMER_ID).ok();
@@ -2119,6 +2149,12 @@ unsafe fn adjust_setting(state: &mut AppState, delta: isize) {
                 state.status = Some(format!("Could not change emoji font: {error}"));
             }
         }
+        4 => {
+            state.config.skin_tone = state.config.skin_tone.next(delta);
+            unsafe {
+                restart_prewarm(state);
+            }
+        }
         _ => {}
     }
     state.selected = state.settings_selected;
@@ -2149,6 +2185,12 @@ unsafe fn activate_setting(state: &mut AppState) {
             }
         }
         4 => {
+            state.config.skin_tone = state.config.skin_tone.cycled();
+            unsafe {
+                restart_prewarm(state);
+            }
+        }
+        5 => {
             state.capturing_shortcut = true;
             state.status = Some("Press the new shortcut".to_string());
         }
@@ -2157,6 +2199,14 @@ unsafe fn activate_setting(state: &mut AppState) {
     unsafe {
         state.sync_accessible_results();
         let _ = InvalidateRect(Some(state.hwnd), None, false);
+    }
+}
+
+/// A changed tone renders through cold cache keys; refill them in idle.
+unsafe fn restart_prewarm(state: &mut AppState) {
+    state.prewarm_cursor = 0;
+    unsafe {
+        let _ = SetTimer(Some(state.hwnd), PREWARM_TIMER_ID, PREWARM_FRAME_MS, None);
     }
 }
 
@@ -2478,6 +2528,13 @@ unsafe fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: boo
         return true;
     }
     if key == VK_ESCAPE {
+        if state.tone_picker.is_some() {
+            state.tone_picker = None;
+            unsafe {
+                let _ = InvalidateRect(Some(state.hwnd), None, false);
+            }
+            return true;
+        }
         unsafe {
             hide_picker(state);
         }
@@ -2611,7 +2668,7 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
         return true;
     }
     if key == VK_DOWN || (control && key.0 == VK_J_VALUE) || key == VK_TAB {
-        state.settings_selected = (state.settings_selected + 1).min(4);
+        state.settings_selected = (state.settings_selected + 1).min(5);
         state.selected = state.settings_selected;
         unsafe {
             state.sync_accessible_results();
@@ -2625,7 +2682,7 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
         }
         return true;
     }
-    if key.0 == 0x20 && state.settings_selected == 4 {
+    if key.0 == 0x20 && state.settings_selected == 5 {
         state.capturing_shortcut = true;
         state.status = Some("Press the new shortcut".to_string());
         unsafe {
@@ -2655,9 +2712,22 @@ fn current_hotkey_modifiers() -> u32 {
 }
 
 unsafe fn commit_selection(state: &mut AppState, close_after: bool) {
-    let Some(text) = state.selected_text().map(str::to_owned) else {
+    let Some(index) = state.selected_entry_index() else {
         return;
     };
+    let base = catalog::entries()[index].glyph.clone();
+    let text = catalog::toned(&base, state.config.skin_tone)
+        .map(str::to_owned)
+        .unwrap_or_else(|| base.clone());
+    unsafe {
+        commit_text(state, text, base, close_after);
+    }
+}
+
+/// Insert `text` into the captured target; `recent_glyph` is the catalog
+/// entry recorded in recents (the base glyph, so the Recent grid always
+/// shows catalog entries and follows the configured tone).
+unsafe fn commit_text(state: &mut AppState, text: String, recent_glyph: String, close_after: bool) {
     let target = state.target;
     let target_focus = state.target_focus;
     // Capture stays active: the hook passes injected events through, so the
@@ -2670,7 +2740,7 @@ unsafe fn commit_selection(state: &mut AppState, close_after: bool) {
     }
     match unsafe { inject_unicode(target, target_focus, &text) } {
         Ok(()) => {
-            if let Err(error) = remember_recent(&mut state.recents, &text) {
+            if let Err(error) = remember_recent(&mut state.recents, &recent_glyph) {
                 eprintln!("winmoji: could not save recent item: {error}");
             }
             if !close_after {
@@ -3067,8 +3137,74 @@ fn settings_footer_rects(width: i32, footer_top: i32) -> (D2D_RECT_F, D2D_RECT_F
     )
 }
 
+unsafe fn open_tone_picker(state: &mut AppState, x: f32, y: f32) {
+    if state.view != View::Search {
+        return;
+    }
+    let entry_index = match hit_test(state, x, y) {
+        Some(HitTarget::SearchResult(row)) => state.matches.get(row).map(|found| found.index),
+        Some(HitTarget::BrowseItem { section, item }) => state
+            .browse_sections
+            .get(section)
+            .and_then(|section| section.indices.get(item))
+            .copied(),
+        _ => None,
+    };
+    let Some(entry_index) = entry_index else {
+        return;
+    };
+    if !catalog::supports_tones(&catalog::entries()[entry_index].glyph) {
+        return;
+    }
+    state.tone_picker = Some(TonePicker {
+        entry_index,
+        anchor_x: x,
+        anchor_y: y,
+    });
+    unsafe {
+        let _ = InvalidateRect(Some(state.hwnd), None, false);
+    }
+}
+
+const TONE_TILE: f32 = 40.0;
+
+fn tone_picker_layout(state: &AppState, picker: &TonePicker) -> (D2D_RECT_F, [D2D_RECT_F; 6]) {
+    let (width, height) = state.dimensions();
+    let popup_width = TONE_TILE * 6.0 + 16.0;
+    let popup_height = TONE_TILE + 34.0;
+    let left = (picker.anchor_x - popup_width / 2.0).clamp(8.0, width as f32 - popup_width - 8.0);
+    let top = if picker.anchor_y - popup_height - 6.0 > SEARCH_RESULTS_TOP as f32 {
+        picker.anchor_y - popup_height - 6.0
+    } else {
+        (picker.anchor_y + 6.0).min(height as f32 - popup_height - 8.0)
+    };
+    let popup = rect(left, top, left + popup_width, top + popup_height);
+    let mut tiles = [popup; 6];
+    for (index, tile) in tiles.iter_mut().enumerate() {
+        let tile_left = left + 8.0 + index as f32 * TONE_TILE;
+        *tile = rect(
+            tile_left,
+            top + 6.0,
+            tile_left + TONE_TILE,
+            top + 6.0 + TONE_TILE,
+        );
+    }
+    (popup, tiles)
+}
+
 fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
     let (width, _) = state.dimensions();
+    if let Some(picker) = &state.tone_picker {
+        let (popup, tiles) = tone_picker_layout(state, picker);
+        for (index, tile) in tiles.iter().enumerate() {
+            if contains(*tile, x, y) {
+                return Some(HitTarget::ToneOption(index));
+            }
+        }
+        if contains(popup, x, y) {
+            return Some(HitTarget::TonePopup);
+        }
+    }
     if contains(header_button_rect(width, 0), x, y) {
         return Some(HitTarget::Close);
     }
@@ -3085,7 +3221,7 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
         return Some(HitTarget::SearchClear);
     }
     if state.view == View::Settings {
-        for index in 0..5 {
+        for index in 0..6 {
             if contains(settings_row_rect(width, index), x, y) {
                 if index == 0 && contains(slider_rect(width, index), x, y) {
                     return Some(HitTarget::WidthSlider);
@@ -3223,7 +3359,20 @@ unsafe fn update_dragged_scrollbar(state: &mut AppState, y: f32) {
 }
 
 unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
-    let Some(target) = hit_test(state, x, y) else {
+    let target = hit_test(state, x, y);
+    if state.tone_picker.is_some()
+        && !matches!(
+            target,
+            Some(HitTarget::ToneOption(_)) | Some(HitTarget::TonePopup)
+        )
+    {
+        state.tone_picker = None;
+        unsafe {
+            let _ = InvalidateRect(Some(state.hwnd), None, false);
+        }
+        return;
+    }
+    let Some(target) = target else {
         return;
     };
     match target {
@@ -3273,6 +3422,19 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
         }
         HitTarget::Insert => unsafe { commit_selection(state, false) },
         HitTarget::InsertClose => unsafe { commit_selection(state, true) },
+        HitTarget::TonePopup => {}
+        HitTarget::ToneOption(index) => {
+            if let Some(picker) = state.tone_picker.take() {
+                let base = catalog::entries()[picker.entry_index].glyph.clone();
+                let tone = SkinTone::ALL[index.min(SkinTone::ALL.len() - 1)];
+                let text = catalog::toned(&base, tone)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| base.clone());
+                unsafe {
+                    commit_text(state, text, base, false);
+                }
+            }
+        }
         HitTarget::SettingRow(index) => {
             state.settings_selected = index;
             state.selected = index;
@@ -3374,23 +3536,26 @@ unsafe fn glyph_bitmap(
     resources: &RenderResources,
     entry_index: usize,
 ) -> Option<ID2D1Bitmap> {
-    if let Some(cached) = resources.glyphs.borrow().get(&entry_index) {
+    let entry = &catalog::entries()[entry_index];
+    let toned = catalog::toned(&entry.glyph, state.config.skin_tone);
+    let key = (
+        entry_index,
+        toned.map_or(0, |_| state.config.skin_tone.index() as u8),
+    );
+    if let Some(cached) = resources.glyphs.borrow().get(&key) {
         return cached.clone();
     }
-    let created = unsafe { render_glyph_bitmap(state, resources, entry_index) }.ok();
-    resources
-        .glyphs
-        .borrow_mut()
-        .insert(entry_index, created.clone());
+    let glyph = toned.unwrap_or(&entry.glyph);
+    let created = unsafe { render_glyph_bitmap(state, resources, glyph) }.ok();
+    resources.glyphs.borrow_mut().insert(key, created.clone());
     created
 }
 
 unsafe fn render_glyph_bitmap(
     state: &AppState,
     resources: &RenderResources,
-    entry_index: usize,
+    glyph: &str,
 ) -> Result<ID2D1Bitmap> {
-    let entry = &catalog::entries()[entry_index];
     let size = D2D_SIZE_F {
         width: GLYPH_TILE,
         height: GLYPH_TILE,
@@ -3417,7 +3582,7 @@ unsafe fn render_glyph_bitmap(
         }));
         draw_text(
             &compatible,
-            &entry.glyph,
+            glyph,
             &state.formats.glyph,
             rect(0.0, 0.0, GLYPH_TILE, GLYPH_TILE),
             &resources.brushes.primary,
@@ -3452,7 +3617,7 @@ unsafe fn prewarm_glyphs(state: &mut AppState) -> bool {
         };
         state.prewarm_cursor += 1;
         let entry = &catalog::entries()[entry_index];
-        if entry.kind == "Emoji" && !resources.glyphs.borrow().contains_key(&entry_index) {
+        if entry.kind == "Emoji" {
             unsafe {
                 glyph_bitmap(state, &resources, entry_index);
             }
@@ -3651,6 +3816,7 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
             &brushes.primary,
             &state.formats.center,
         );
+        draw_tone_picker(state, &target, &brushes);
         draw_hover_help(
             state,
             &target,
@@ -4138,6 +4304,7 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
                 EmojiFont::SegoeSymbol => "Monochrome".to_string(),
             },
         ),
+        ("Skin tone", state.config.skin_tone.to_string()),
         (
             "Open shortcut",
             if state.capturing_shortcut {
@@ -4215,7 +4382,7 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
         }
     }
 
-    let hint_top = settings_row_rect(width, 4).bottom + 8.0;
+    let hint_top = settings_row_rect(width, 5).bottom + 8.0;
     unsafe {
         draw_text(
             &target,
@@ -4355,6 +4522,67 @@ unsafe fn draw_button(
             bounds,
             text,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+    }
+}
+
+unsafe fn draw_tone_picker(state: &AppState, target: &ID2D1HwndRenderTarget, brushes: &Brushes) {
+    let Some(picker) = &state.tone_picker else {
+        return;
+    };
+    let (popup, tiles) = tone_picker_layout(state, picker);
+    let base = &catalog::entries()[picker.entry_index].glyph;
+    unsafe {
+        target.FillRoundedRectangle(
+            &rounded_rect(popup.left, popup.top, popup.right, popup.bottom, 8.0),
+            &brushes.surface,
+        );
+        target.DrawRoundedRectangle(
+            &rounded_rect(popup.left, popup.top, popup.right, popup.bottom, 8.0),
+            &brushes.selection_border,
+            1.0,
+            None,
+        );
+        for (index, tile) in tiles.iter().enumerate() {
+            let tone = SkinTone::ALL[index];
+            let hovered = matches!(
+                state.hovered_target,
+                Some(HitTarget::ToneOption(hovered)) if hovered == index
+            );
+            if hovered {
+                target.FillRoundedRectangle(
+                    &rounded_rect(
+                        tile.left + 1.0,
+                        tile.top + 1.0,
+                        tile.right - 1.0,
+                        tile.bottom - 1.0,
+                        7.0,
+                    ),
+                    &brushes.selection,
+                );
+            }
+            let glyph = catalog::toned(base, tone).unwrap_or(base);
+            draw_text(
+                target,
+                glyph,
+                &state.formats.glyph,
+                *tile,
+                &brushes.primary,
+                D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+            );
+        }
+        draw_text(
+            target,
+            "Inserts once · default is in Settings",
+            &state.formats.center,
+            rect(
+                popup.left,
+                popup.bottom - 24.0,
+                popup.right,
+                popup.bottom - 4.0,
+            ),
+            &brushes.secondary,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
         );
     }
 }
