@@ -24,8 +24,8 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
     D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_ROUNDED_RECT, D2D1CreateFactory, ID2D1Bitmap, ID2D1DeviceContext, ID2D1Factory1,
-    ID2D1RenderTarget, ID2D1SolidColorBrush,
+    D2D1_ROUNDED_RECT, D2D1CreateFactory, ID2D1Bitmap, ID2D1BitmapRenderTarget, ID2D1Device,
+    ID2D1DeviceContext, ID2D1Factory1, ID2D1RenderTarget, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
@@ -34,8 +34,8 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::{
     DXGI_MWA_NO_ALT_ENTER, DXGI_MWA_NO_WINDOW_CHANGES, DXGI_PRESENT, DXGI_SCALING_NONE,
     DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
-    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2,
-    IDXGISurface, IDXGISwapChain2,
+    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIDevice3,
+    IDXGIFactory2, IDXGISurface, IDXGISwapChain2,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -99,7 +99,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     KBDLLHOOKSTRUCT, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL,
     LBN_DBLCLK, LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LLKHF_INJECTED,
     LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx,
-    OBJID_CLIENT, PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, QS_ALLINPUT,
+    OBJID_CLIENT, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, QS_ALLINPUT,
     RegisterClassW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
     SetForegroundWindow,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
@@ -159,11 +159,32 @@ const VK_K_VALUE: u16 = 0x4b;
 const VK_L_VALUE: u16 = 0x4c;
 const VK_OEM_COMMA_VALUE: u16 = 0xbc;
 const FOCUS_TIMER_ID: usize = 0x0057_4d02;
-const PREWARM_TIMER_ID: usize = 0x0057_4d03;
 const FOCUS_FRAME_MS: u32 = 100;
-const PREWARM_FRAME_MS: u32 = 24;
-const PREWARM_CHUNK: usize = 128;
 const GLYPH_TILE: f32 = 44.0;
+/// Glyphs are packed into shared atlas pages of this many tiles per side.
+/// One render target per glyph would make Direct2D allocate a whole backing
+/// texture per emoji, which costs both a GPU round trip to fill and orders
+/// of magnitude more memory than the 44 pixel tile needs.
+const ATLAS_SIDE: u32 = 16;
+const ATLAS_SLOTS: u32 = ATLAS_SIDE * ATLAS_SIDE;
+/// Glyphs rasterized per BeginDraw/EndDraw pair. Small enough that a slice
+/// still checks the clock and the message queue often.
+const ATLAS_BATCH: usize = 8;
+/// Atlas pages kept while the picker is hidden. Enough that reopening on the
+/// recent grid paints from cache; beyond it the tiles came from browsing the
+/// catalog and are dropped.
+const ATLAS_RESIDENT_PAGES: usize = 4;
+/// Wall-clock ceiling on one glyph-warming slice while the picker is on
+/// screen, and while it is hidden. Rasterizing a single color emoji costs
+/// several milliseconds, so warming is only ever done in these bounded
+/// slices between messages, never on the path from input to pixels.
+const WARM_SLICE_VISIBLE_MS: u64 = 4;
+const WARM_SLICE_HIDDEN_MS: u64 = 12;
+/// Pause between background slices while the picker is hidden.
+const WARM_IDLE_PAUSE_MS: u32 = 20;
+/// Quiet period after the last wheel event before warming may resume, so a
+/// gesture in flight never competes with rasterization.
+const WARM_GESTURE_QUIET_MS: u64 = 120;
 /// Content distance one wheel notch scrolls, in DIPs.
 const WHEEL_NOTCH_DIPS: f32 = 76.0;
 // Marks our own SendInput batches so the keyboard hook can recognize them.
@@ -815,7 +836,9 @@ struct AppState {
     d2d_factory: ID2D1Factory1,
     dwrite_factory: IDWriteFactory,
     render: Option<RenderResources>,
-    prewarm_cursor: usize,
+    /// When the last wheel event arrived, so warming stays out of the way
+    /// while a gesture is in flight.
+    last_wheel: Option<Instant>,
     formats: TextFormats,
     keep_visible: bool,
     /// Timestamp of the last animation frame; drives time-based smoothing so
@@ -824,11 +847,71 @@ struct AppState {
 }
 
 /// Device-bound rendering state: the swap chain, the brush set, and the
-/// per-entry glyph bitmap cache. Color emoji rasterization costs several
-/// milliseconds per glyph; each glyph renders once into a small bitmap and
-/// every later frame blits it. All of this dies together on device loss.
+/// glyph atlas. Color emoji rasterization costs several milliseconds per
+/// glyph; each glyph renders once into an atlas tile and every later frame
+/// blits it. All of this dies together on device loss.
 /// Cache key: catalog entry index plus the applied skin tone ordinal.
-type GlyphCache = HashMap<(usize, u8), Option<ID2D1Bitmap>>;
+/// A cached `None` marks a glyph that failed to rasterize, so it is not
+/// retried every frame.
+type GlyphCache = HashMap<(usize, u8), Option<GlyphSlot>>;
+
+/// Where a rasterized glyph lives: which atlas page, and the tile within it.
+#[derive(Clone, Copy)]
+struct GlyphSlot {
+    page: usize,
+    source: D2D_RECT_F,
+}
+
+/// One atlas texture holding `ATLAS_SLOTS` glyph tiles.
+struct AtlasPage {
+    target: ID2D1BitmapRenderTarget,
+    bitmap: ID2D1Bitmap,
+    used: u32,
+}
+
+fn atlas_slot_rect(slot: u32) -> D2D_RECT_F {
+    let left = (slot % ATLAS_SIDE) as f32 * GLYPH_TILE;
+    let top = (slot / ATLAS_SIDE) as f32 * GLYPH_TILE;
+    rect(left, top, left + GLYPH_TILE, top + GLYPH_TILE)
+}
+
+/// Allocate an empty atlas page. Clearing once here means the per-glyph
+/// batches never need to clear, so they only draw.
+unsafe fn create_atlas_page(target: &ID2D1RenderTarget) -> Result<AtlasPage> {
+    let side = GLYPH_TILE * ATLAS_SIDE as f32;
+    let size = D2D_SIZE_F {
+        width: side,
+        height: side,
+    };
+    let format = D2D1_PIXEL_FORMAT {
+        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+    };
+    let page = unsafe {
+        target.CreateCompatibleRenderTarget(
+            Some(&size),
+            None,
+            Some(&format),
+            D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+        )?
+    };
+    unsafe {
+        page.BeginDraw();
+        page.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }));
+        page.EndDraw(None, None)?;
+    }
+    let bitmap = unsafe { page.GetBitmap()? };
+    Ok(AtlasPage {
+        target: page,
+        bitmap,
+        used: 0,
+    })
+}
 
 /// Owns the swap chain's frame-latency waitable handle so it closes exactly
 /// once when the device stack is torn down.
@@ -850,17 +933,19 @@ struct RenderResources {
     /// drawing code works against this.
     target: ID2D1RenderTarget,
     context: ID2D1DeviceContext,
+    device: ID2D1Device,
+    dxgi_device: IDXGIDevice,
     swapchain: IDXGISwapChain2,
     /// Signals when the compositor can accept a new frame; waiting on it
     /// paces animation to the monitor refresh rate with one frame of latency.
     frame_gate: Rc<FrameLatencyGate>,
     brushes: Brushes,
     glyphs: Rc<RefCell<GlyphCache>>,
-    /// Cold rasterizations allowed in the current frame; a scroll frame never
-    /// stalls on rasterizing the whole viewport, missing glyphs fill in over
-    /// the next frames instead.
-    cold_budget: Rc<std::cell::Cell<i32>>,
-    cold_skipped: Rc<std::cell::Cell<bool>>,
+    atlas: Rc<RefCell<Vec<AtlasPage>>>,
+    /// Entries a frame wanted but could not draw because they were not
+    /// rasterized yet. Drawing never rasterizes; it records the miss here and
+    /// leaves the tile empty, and the idle warmer fills it for a later frame.
+    wanted: Rc<RefCell<Vec<usize>>>,
 }
 
 #[derive(Clone)]
@@ -947,7 +1032,7 @@ impl AppState {
             d2d_factory,
             dwrite_factory,
             render: None,
-            prewarm_cursor: 0,
+            last_wheel: None,
             formats,
             keep_visible,
             last_frame: None,
@@ -1364,6 +1449,27 @@ impl AppState {
         visible
     }
 
+    /// Entries within the viewport plus a viewport of lookahead either way.
+    /// Warming this window means scrolling runs into tiles that are already
+    /// rasterized, without paying to rasterize a catalog the user may never
+    /// look at.
+    fn prefetch_entries(&self) -> Vec<usize> {
+        let viewport = (self.footer_top() - BROWSE_CONTENT_TOP).max(1) as f32;
+        let top = self.browse_scroll - viewport;
+        let bottom = self.browse_scroll + viewport * 2.0;
+        let layouts = self.section_layouts();
+        let mut found = Vec::new();
+        for (section, layout) in self.browse_sections.iter().zip(layouts.iter()) {
+            if (layout.bottom as f32) < top || (layout.top as f32) > bottom {
+                continue;
+            }
+            for item in visible_item_range(*layout, section.indices.len(), top, bottom) {
+                found.push(section.indices[item]);
+            }
+        }
+        found
+    }
+
     fn selected_entry_index(&self) -> Option<usize> {
         if self.view != View::Search {
             return None;
@@ -1707,12 +1813,23 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
                 render_animation_frame(state);
             } else {
                 state.last_frame = None;
-                let _ = MsgWaitForMultipleObjectsEx(
-                    None,
-                    INFINITE,
-                    QS_ALLINPUT,
-                    MWMO_INPUTAVAILABLE,
-                );
+                // Warming ahead for a picker nobody is looking at is never
+                // urgent; duty-cycle it so the resident process does not
+                // monopolise a core.
+                let wait = match warm_glyph_slice(state) {
+                    WarmOutcome::Worked if IsWindowVisible(state.hwnd).as_bool() => 0,
+                    WarmOutcome::Worked => WARM_IDLE_PAUSE_MS,
+                    WarmOutcome::Waiting(milliseconds) => milliseconds,
+                    WarmOutcome::Done => INFINITE,
+                };
+                if wait > 0 {
+                    let _ = MsgWaitForMultipleObjectsEx(
+                        None,
+                        wait,
+                        QS_ALLINPUT,
+                        MWMO_INPUTAVAILABLE,
+                    );
+                }
             }
         }
 
@@ -1991,9 +2108,6 @@ unsafe extern "system" fn window_proc(
                     SetLayeredWindowAttributes(state.accessible_results, COLORREF(0), 0, LWA_ALPHA);
                 set_accessible_name(state.accessible_results, w!("Search results"));
                 state.sync_accessible_results();
-                // Start filling the glyph cache while the window is still
-                // hidden so the first open paints instantly.
-                let _ = SetTimer(Some(hwnd), PREWARM_TIMER_ID, PREWARM_FRAME_MS, None);
             }
             LRESULT(0)
         }
@@ -2103,14 +2217,6 @@ unsafe extern "system" fn window_proc(
         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
             unsafe {
                 route_wheel(state, message == WM_MOUSEHWHEEL, wparam, lparam);
-            }
-            LRESULT(0)
-        }
-        WM_TIMER if wparam.0 == PREWARM_TIMER_ID => {
-            if !unsafe { prewarm_glyphs(state) } {
-                unsafe {
-                    KillTimer(Some(hwnd), PREWARM_TIMER_ID).ok();
-                }
             }
             LRESULT(0)
         }
@@ -2228,6 +2334,29 @@ unsafe fn arm_focus_watch(state: &AppState) {
     }
 }
 
+/// Release the glyph and driver caches that browsing accumulates. Rendering
+/// the whole catalog leaves Direct2D and DirectWrite holding hundreds of
+/// megabytes of rasterized glyphs, which a picker that spends most of its
+/// life hidden has no business keeping.
+unsafe fn release_browsing_caches(state: &mut AppState) {
+    let Some(resources) = &state.render else {
+        return;
+    };
+    // Tiles from a long browse are not worth keeping; a handful of pages is,
+    // so the common open-glance-pick cycle still paints from a warm cache.
+    if resources.atlas.borrow().len() > ATLAS_RESIDENT_PAGES {
+        resources.glyphs.borrow_mut().clear();
+        resources.atlas.borrow_mut().clear();
+    }
+    resources.wanted.borrow_mut().clear();
+    unsafe {
+        resources.device.ClearResources(0);
+        if let Ok(dxgi) = resources.dxgi_device.cast::<IDXGIDevice3>() {
+            dxgi.Trim();
+        }
+    }
+}
+
 unsafe fn hide_picker(state: &mut AppState) {
     state.tone_picker = None;
     // Cancel any scroll in flight so the loop never animates a hidden window.
@@ -2238,6 +2367,7 @@ unsafe fn hide_picker(state: &mut AppState) {
         stop_keyboard_capture(state);
         KillTimer(Some(state.hwnd), FOCUS_TIMER_ID).ok();
         let _ = ShowWindow(state.hwnd, SW_HIDE);
+        release_browsing_caches(state);
     }
 }
 
@@ -2315,9 +2445,6 @@ unsafe fn adjust_setting(state: &mut AppState, delta: isize) {
         }
         4 => {
             state.config.skin_tone = state.config.skin_tone.next(delta);
-            unsafe {
-                restart_prewarm(state);
-            }
         }
         _ => {}
     }
@@ -2350,9 +2477,6 @@ unsafe fn activate_setting(state: &mut AppState) {
         }
         4 => {
             state.config.skin_tone = state.config.skin_tone.cycled();
-            unsafe {
-                restart_prewarm(state);
-            }
         }
         5 => {
             set_capturing_shortcut(state, true);
@@ -2363,14 +2487,6 @@ unsafe fn activate_setting(state: &mut AppState) {
     unsafe {
         state.sync_accessible_results();
         let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
-}
-
-/// A changed tone renders through cold cache keys; refill them in idle.
-unsafe fn restart_prewarm(state: &mut AppState) {
-    state.prewarm_cursor = 0;
-    unsafe {
-        let _ = SetTimer(Some(state.hwnd), PREWARM_TIMER_ID, PREWARM_FRAME_MS, None);
     }
 }
 
@@ -3109,6 +3225,7 @@ unsafe fn route_wheel(state: &mut AppState, horizontal: bool, wparam: WPARAM, lp
     if state.view != View::Search || !state.browsing() {
         return;
     }
+    state.last_wheel = Some(Instant::now());
     let notches = ((wparam.0 >> 16) as u16 as i16 as f32) / 120.0;
     // Wheel messages carry the cursor position in screen coordinates.
     let mut point = POINT {
@@ -3751,20 +3868,16 @@ unsafe fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> 
     let resources = RenderResources {
         target,
         context,
+        device: d2d_device,
+        dxgi_device,
         swapchain,
         frame_gate,
         brushes,
         glyphs: Rc::new(RefCell::new(HashMap::new())),
-        cold_budget: Rc::new(std::cell::Cell::new(0)),
-        cold_skipped: Rc::new(std::cell::Cell::new(false)),
+        atlas: Rc::new(RefCell::new(Vec::new())),
+        wanted: Rc::new(RefCell::new(Vec::new())),
     };
     state.render = Some(resources.clone());
-    // A fresh device means an empty glyph cache; refill it during idle time
-    // so opening and scrolling never wait on cold emoji rasterization.
-    state.prewarm_cursor = 0;
-    unsafe {
-        let _ = SetTimer(Some(state.hwnd), PREWARM_TIMER_ID, PREWARM_FRAME_MS, None);
-    }
     Ok(resources)
 }
 
@@ -3871,112 +3984,168 @@ unsafe fn render_animation_frame(state: &mut AppState) {
     }
 }
 
-unsafe fn glyph_bitmap(
+fn glyph_key(state: &AppState, entry_index: usize) -> (usize, u8) {
+    let entry = &catalog::entries()[entry_index];
+    let toned = catalog::toned(&entry.glyph, state.config.skin_tone);
+    (
+        entry_index,
+        toned.map_or(0, |_| state.config.skin_tone.index() as u8),
+    )
+}
+
+/// Look up an already-rasterized glyph. Drawing never rasterizes: a color
+/// emoji costs several milliseconds to raster, and doing that on the way to
+/// the screen is what made scrolling stall behind the wheel. A miss is
+/// recorded for the idle warmer and the tile stays empty for this frame.
+fn glyph_slot(
     state: &AppState,
     resources: &RenderResources,
     entry_index: usize,
-) -> Option<ID2D1Bitmap> {
-    let entry = &catalog::entries()[entry_index];
-    let toned = catalog::toned(&entry.glyph, state.config.skin_tone);
-    let key = (
-        entry_index,
-        toned.map_or(0, |_| state.config.skin_tone.index() as u8),
-    );
+) -> Option<GlyphSlot> {
+    let key = glyph_key(state, entry_index);
     if let Some(cached) = resources.glyphs.borrow().get(&key) {
-        return cached.clone();
+        return *cached;
     }
-    if resources.cold_budget.get() <= 0 {
-        resources.cold_skipped.set(true);
-        return None;
-    }
-    resources.cold_budget.set(resources.cold_budget.get() - 1);
-    let glyph = toned.unwrap_or(&entry.glyph);
-    let created = unsafe { render_glyph_bitmap(state, resources, glyph) }.ok();
-    resources.glyphs.borrow_mut().insert(key, created.clone());
-    created
+    resources.wanted.borrow_mut().push(entry_index);
+    None
 }
 
-unsafe fn render_glyph_bitmap(
-    state: &AppState,
-    resources: &RenderResources,
-    glyph: &str,
-) -> Result<ID2D1Bitmap> {
-    let size = D2D_SIZE_F {
-        width: GLYPH_TILE,
-        height: GLYPH_TILE,
-    };
-    let format = D2D1_PIXEL_FORMAT {
-        format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-    };
-    let compatible = unsafe {
-        resources.target.CreateCompatibleRenderTarget(
-            Some(&size),
-            None,
-            Some(&format),
-            D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
-        )?
-    };
-    unsafe {
-        compatible.BeginDraw();
-        compatible.Clear(Some(&D2D1_COLOR_F {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.0,
-        }));
-        draw_text(
-            &compatible,
-            glyph,
-            &state.formats.glyph,
-            rect(0.0, 0.0, GLYPH_TILE, GLYPH_TILE),
-            &resources.brushes.primary,
-            D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
-        );
-        compatible.EndDraw(None, None)?;
-        compatible.GetBitmap()
+/// Rasterize a batch of glyphs into atlas tiles. Everything landing on one
+/// page shares a single BeginDraw/EndDraw pair, so the GPU round trip that
+/// dominates the cost is paid once per batch rather than once per glyph.
+/// Only ever called from the idle warmer.
+unsafe fn rasterize_batch(state: &AppState, resources: &RenderResources, batch: &[usize]) {
+    let mut atlas = resources.atlas.borrow_mut();
+    let mut position = 0;
+    while position < batch.len() {
+        if atlas.last().is_none_or(|page| page.used >= ATLAS_SLOTS) {
+            match unsafe { create_atlas_page(&resources.target) } {
+                Ok(page) => atlas.push(page),
+                Err(_) => return,
+            }
+        }
+        let page_index = atlas.len() - 1;
+        let page = &mut atlas[page_index];
+        unsafe {
+            page.target.BeginDraw();
+        }
+        while position < batch.len() && page.used < ATLAS_SLOTS {
+            let entry_index = batch[position];
+            position += 1;
+            let entry = &catalog::entries()[entry_index];
+            let glyph =
+                catalog::toned(&entry.glyph, state.config.skin_tone).unwrap_or(&entry.glyph);
+            let source = atlas_slot_rect(page.used);
+            page.used += 1;
+            unsafe {
+                // Clip so a glyph that overflows its advance cannot bleed
+                // into the neighbouring tiles.
+                page.target
+                    .PushAxisAlignedClip(&source, D2D1_ANTIALIAS_MODE_ALIASED);
+                draw_text(
+                    &page.target,
+                    glyph,
+                    &state.formats.glyph,
+                    source,
+                    &resources.brushes.primary,
+                    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+                );
+                page.target.PopAxisAlignedClip();
+            }
+            resources.glyphs.borrow_mut().insert(
+                glyph_key(state, entry_index),
+                Some(GlyphSlot {
+                    page: page_index,
+                    source,
+                }),
+            );
+        }
+        let _ = unsafe { page.target.EndDraw(None, None) };
     }
 }
 
-/// Warm a slice of the glyph cache; returns false once the queue is drained.
-unsafe fn prewarm_glyphs(state: &mut AppState) -> bool {
+/// True when a message is already waiting, so warming can yield instantly.
+unsafe fn input_pending() -> bool {
+    let mut message = MSG::default();
+    unsafe { PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE) }.as_bool()
+}
+
+/// Glyphs worth rasterizing now: whatever the last frame could not draw,
+/// then the prefetch window around the current scroll position.
+fn cold_glyphs(state: &AppState, resources: &RenderResources) -> Vec<usize> {
+    let entries = catalog::entries();
+    let cache = resources.glyphs.borrow();
+    let mut seen = HashMap::new();
+    resources
+        .wanted
+        .borrow_mut()
+        .drain(..)
+        .chain(state.prefetch_entries())
+        .filter(|entry_index| {
+            entries[*entry_index].kind == "Emoji"
+                && state.displayable_entries[*entry_index]
+                && !cache.contains_key(&glyph_key(state, *entry_index))
+                && seen.insert(*entry_index, ()).is_none()
+        })
+        .collect()
+}
+
+/// What the idle warmer wants the message loop to do next.
+enum WarmOutcome {
+    /// Rasterized at least one glyph; come back as soon as input allows.
+    Worked,
+    /// Glyphs are still missing but warming must hold off this long.
+    Waiting(u32),
+    /// Nothing left to rasterize; the loop may sleep until input arrives.
+    Done,
+}
+
+/// Rasterize a bounded slice of missing glyphs during idle time. The slice
+/// is capped by wall clock and abandoned the instant a message arrives, so
+/// rasterization can never delay input by more than a single glyph.
+unsafe fn warm_glyph_slice(state: &mut AppState) -> WarmOutcome {
     if state.config.emoji_font != EmojiFont::SegoeEmoji {
-        return false;
+        return WarmOutcome::Done;
+    }
+    let visible = unsafe { IsWindowVisible(state.hwnd) }.as_bool();
+    // A gesture still in flight owns the input thread outright. Come back
+    // once it has been quiet, rather than sleeping until unrelated input
+    // happens to arrive and leaving the tiles it uncovered blank.
+    if visible && let Some(last) = state.last_wheel {
+        let quiet = Duration::from_millis(WARM_GESTURE_QUIET_MS);
+        if let Some(remaining) = quiet.checked_sub(last.elapsed()) {
+            return WarmOutcome::Waiting(remaining.as_millis() as u32 + 1);
+        }
     }
     let Ok(resources) = (unsafe { ensure_render_target(state) }) else {
-        return false;
+        return WarmOutcome::Done;
     };
-    // While the picker is open, large chunks would delay our own input
-    // handling; hidden, the whole catalog can warm as fast as possible.
-    let chunk = if state.capture_active {
-        4
+    let slice = Duration::from_millis(if visible {
+        WARM_SLICE_VISIBLE_MS
     } else {
-        PREWARM_CHUNK
-    };
-    let mut warmed = 0;
-    while warmed < chunk {
-        let mut position = state.prewarm_cursor;
-        let mut entry_index = None;
-        for section in &state.browse_sections {
-            if position < section.indices.len() {
-                entry_index = Some(section.indices[position]);
-                break;
-            }
-            position -= section.indices.len();
+        WARM_SLICE_HIDDEN_MS
+    });
+    let started = Instant::now();
+    let mut warmed = 0usize;
+    let cold = cold_glyphs(state, &resources);
+    for batch in cold.chunks(ATLAS_BATCH) {
+        if started.elapsed() >= slice || unsafe { input_pending() } {
+            break;
         }
-        let Some(entry_index) = entry_index else {
-            return false;
-        };
-        state.prewarm_cursor += 1;
-        let entry = &catalog::entries()[entry_index];
-        if entry.kind == "Emoji" {
-            unsafe {
-                glyph_bitmap(state, &resources, entry_index);
-            }
-            warmed += 1;
+        unsafe {
+            rasterize_batch(state, &resources, batch);
+        }
+        warmed += batch.len();
+    }
+    if warmed == 0 {
+        return WarmOutcome::Done;
+    }
+    if visible {
+        unsafe {
+            let _ = InvalidateRect(Some(state.hwnd), None, false);
         }
     }
-    true
+    WarmOutcome::Worked
 }
 
 unsafe fn draw_picker(state: &mut AppState) -> Result<()> {
@@ -3988,10 +4157,7 @@ unsafe fn draw_picker(state: &mut AppState) -> Result<()> {
 
 unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
     let resources = unsafe { ensure_render_target(state)? };
-    resources
-        .cold_budget
-        .set(if state.capture_active { 6 } else { 12 });
-    resources.cold_skipped.set(false);
+    resources.wanted.borrow_mut().clear();
     let target = resources.target.clone();
     let brushes = resources.brushes.clone();
     let (width, height) = state.dimensions();
@@ -4181,11 +4347,6 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
             &brushes.primary,
         );
         target.EndDraw(None, None)?;
-    }
-    if resources.cold_skipped.get() {
-        unsafe {
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
     }
     Ok(())
 }
@@ -5118,11 +5279,11 @@ unsafe fn draw_glyph(
     let target = &resources.target;
     let entry = &catalog::entries()[entry_index];
     if entry.kind == "Emoji" && state.config.emoji_font == EmojiFont::SegoeEmoji {
-        // Blit the cached bitmap instead of rasterizing the color glyph
-        // again. A budget-skipped glyph stays blank this frame and fills in
-        // on the follow-up paint; falling back to DrawText here would spend
-        // exactly the rasterization time the budget exists to avoid.
-        if let Some(bitmap) = unsafe { glyph_bitmap(state, resources, entry_index) } {
+        // Blit the cached atlas tile. A glyph that has not been rasterized
+        // yet stays blank for this frame and the idle warmer fills it in;
+        // rasterizing here instead would put several milliseconds of GPU work
+        // directly between the wheel and the pixels.
+        if let Some(slot) = glyph_slot(state, resources, entry_index) {
             let side = (bounds.right - bounds.left).min(bounds.bottom - bounds.top);
             let center_x = (bounds.left + bounds.right) / 2.0;
             let center_y = (bounds.top + bounds.bottom) / 2.0;
@@ -5132,14 +5293,17 @@ unsafe fn draw_glyph(
                 center_x + side / 2.0,
                 center_y + side / 2.0,
             );
-            unsafe {
-                target.DrawBitmap(
-                    &bitmap,
-                    Some(&destination),
-                    1.0,
-                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                    None,
-                );
+            let atlas = resources.atlas.borrow();
+            if let Some(page) = atlas.get(slot.page) {
+                unsafe {
+                    target.DrawBitmap(
+                        &page.bitmap,
+                        Some(&destination),
+                        1.0,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        Some(&slot.source),
+                    );
+                }
             }
         }
         return;
