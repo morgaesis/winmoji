@@ -31,12 +31,6 @@ use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TY
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
 };
-use windows::Win32::Graphics::Dxgi::{
-    DXGI_MWA_NO_ALT_ENTER, DXGI_MWA_NO_WINDOW_CHANGES, DXGI_PRESENT, DXGI_SCALING_NONE,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
-    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIDevice3,
-    IDXGIFactory2, IDXGISurface, IDXGISwapChain2,
-};
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS,
@@ -51,6 +45,12 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
+};
+use windows::Win32::Graphics::Dxgi::{
+    DXGI_MWA_NO_ALT_ENTER, DXGI_MWA_NO_WINDOW_CHANGES, DXGI_PRESENT, DXGI_SCALING_NONE,
+    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIDevice3,
+    IDXGIFactory2, IDXGISurface, IDXGISwapChain2,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
@@ -95,22 +95,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, FindWindowW,
     GUITHREADINFO, GWLP_USERDATA, GetClientRect, GetCursorPos, GetForegroundWindow,
     GetGUIThreadInfo, GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, HMENU, IDC_ARROW, IsChild, IsWindow, IsWindowVisible,
-    KBDLLHOOKSTRUCT, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL,
-    LBN_DBLCLK, LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LLKHF_INJECTED,
-    LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx,
-    OBJID_CLIENT, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, QS_ALLINPUT,
-    RegisterClassW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetForegroundWindow,
+    GetWindowTextW, GetWindowThreadProcessId, HMENU, HTCLIENT, IDC_ARROW, IDC_SIZENWSE, IsChild,
+    IsWindow, IsWindowVisible, KBDLLHOOKSTRUCT, KillTimer, LB_ADDSTRING, LB_GETCURSEL,
+    LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT,
+    LBS_NOTIFY, LLKHF_INJECTED, LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT, MWMO_INPUTAVAILABLE,
+    MsgWaitForMultipleObjectsEx, OBJID_CLIENT, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostMessageW,
+    PostQuitMessage, QS_ALLINPUT, RegisterClassW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
     ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_STYLE,
     WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
     WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_SIZE,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN, WNDCLASSW, WS_CHILD, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_TABSTOP,
-    WS_VISIBLE,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_SETCURSOR,
+    WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN, WNDCLASSW, WS_CHILD,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(not(feature = "console"))]
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MESSAGEBOX_STYLE, MessageBoxW};
@@ -182,11 +181,10 @@ const WARM_SLICE_VISIBLE_MS: u64 = 4;
 const WARM_SLICE_HIDDEN_MS: u64 = 12;
 /// Pause between background slices while the picker is hidden.
 const WARM_IDLE_PAUSE_MS: u32 = 20;
-/// Quiet period after the last wheel event before warming may resume, so a
-/// gesture in flight never competes with rasterization.
-const WARM_GESTURE_QUIET_MS: u64 = 120;
 /// Content distance one wheel notch scrolls, in DIPs.
 const WHEEL_NOTCH_DIPS: f32 = 76.0;
+/// Side of the square drag handle in the bottom-right corner, in DIPs.
+const RESIZE_GRIP: f32 = 16.0;
 // Marks our own SendInput batches so the keyboard hook can recognize them.
 const INJECTION_TAG: usize = 0x574d_4f4a;
 
@@ -456,6 +454,7 @@ enum HitTarget {
     SettingsDiscard,
     SettingsReset,
     SettingsBack,
+    ResizeGrip,
 }
 
 struct TextFormats {
@@ -465,6 +464,9 @@ struct TextFormats {
     metadata: IDWriteTextFormat,
     search: IDWriteTextFormat,
     glyph: IDWriteTextFormat,
+    /// The emoji face at preview size, following the configured emoji font so
+    /// settings show the setting rather than describing it.
+    glyph_small: IDWriteTextFormat,
     symbol: IDWriteTextFormat,
     math: IDWriteTextFormat,
     emoticon: IDWriteTextFormat,
@@ -484,6 +486,10 @@ impl TextFormats {
         let glyph = unsafe { create_text_format(factory, emoji_family, 26.0, false)? };
         unsafe {
             glyph.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+        }
+        let glyph_small = unsafe { create_text_format(factory, emoji_family, 17.0, false)? };
+        unsafe {
+            glyph_small.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         }
         let symbol = unsafe { create_text_format(factory, w!("Segoe UI Symbol"), 23.0, false)? };
         unsafe {
@@ -533,6 +539,7 @@ impl TextFormats {
                 create_text_format(factory, w!("Segoe UI Variable Text"), 14.0, false)?
             },
             glyph,
+            glyph_small,
             symbol,
             math,
             emoticon: centered(unsafe {
@@ -826,6 +833,9 @@ struct AppState {
     settings_original: Config,
     dragging_slider: Option<Slider>,
     dragging_scrollbar: Option<f32>,
+    /// Cursor offset from the window's bottom-right corner while the corner
+    /// grip is being dragged, in physical pixels.
+    dragging_resize: Option<(i32, i32)>,
     capturing_shortcut: bool,
     keyboard_state: [u8; 256],
     pending_commit: Option<bool>,
@@ -836,9 +846,10 @@ struct AppState {
     d2d_factory: ID2D1Factory1,
     dwrite_factory: IDWriteFactory,
     render: Option<RenderResources>,
-    /// When the last wheel event arrived, so warming stays out of the way
-    /// while a gesture is in flight.
-    last_wheel: Option<Instant>,
+    /// Set when something changed the picture. The message loop renders at
+    /// most one frame per display refresh, so a burst of input coalesces into
+    /// a single paced frame instead of one present per event.
+    needs_render: bool,
     formats: TextFormats,
     keep_visible: bool,
     /// Timestamp of the last animation frame; drives time-based smoothing so
@@ -1022,6 +1033,7 @@ impl AppState {
             settings_original: config,
             dragging_slider: None,
             dragging_scrollbar: None,
+            dragging_resize: None,
             capturing_shortcut: false,
             keyboard_state: [0; 256],
             pending_commit: None,
@@ -1032,7 +1044,7 @@ impl AppState {
             d2d_factory,
             dwrite_factory,
             render: None,
-            last_wheel: None,
+            needs_render: false,
             formats,
             keep_visible,
             last_frame: None,
@@ -1811,6 +1823,12 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
             let state = &mut *state_pointer;
             if state.scroll_animation_active() {
                 render_animation_frame(state);
+            } else if state.needs_render {
+                render_frame(state);
+                // A frame costs a fraction of the refresh interval; spend
+                // the slack filling tiles so rows revealed by a continuous
+                // scroll are not left blank until the gesture stops.
+                let _ = warm_glyph_slice(state);
             } else {
                 state.last_frame = None;
                 // Warming ahead for a picker nobody is looking at is never
@@ -1819,16 +1837,11 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
                 let wait = match warm_glyph_slice(state) {
                     WarmOutcome::Worked if IsWindowVisible(state.hwnd).as_bool() => 0,
                     WarmOutcome::Worked => WARM_IDLE_PAUSE_MS,
-                    WarmOutcome::Waiting(milliseconds) => milliseconds,
                     WarmOutcome::Done => INFINITE,
                 };
                 if wait > 0 {
-                    let _ = MsgWaitForMultipleObjectsEx(
-                        None,
-                        wait,
-                        QS_ALLINPUT,
-                        MWMO_INPUTAVAILABLE,
-                    );
+                    let _ =
+                        MsgWaitForMultipleObjectsEx(None, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
                 }
             }
         }
@@ -2171,7 +2184,9 @@ unsafe extern "system" fn window_proc(
         WM_MOUSEMOVE => {
             let (x, y) = mouse_point_dip(lparam, state.dpi);
             unsafe {
-                if state.dragging_slider.is_some() {
+                if state.dragging_resize.is_some() {
+                    update_dragged_resize(state);
+                } else if state.dragging_slider.is_some() {
                     update_dragged_slider(state, x);
                 } else if state.dragging_scrollbar.is_some() {
                     update_dragged_scrollbar(state, y);
@@ -2180,6 +2195,20 @@ unsafe extern "system" fn window_proc(
                 }
             }
             LRESULT(0)
+        }
+        WM_SETCURSOR if (lparam.0 as u32 & 0xffff) == HTCLIENT => {
+            let over_grip = matches!(state.hovered_target, Some(HitTarget::ResizeGrip))
+                || state.dragging_resize.is_some();
+            if over_grip {
+                unsafe {
+                    if let Ok(cursor) = LoadCursorW(None, IDC_SIZENWSE) {
+                        SetCursor(Some(cursor));
+                    }
+                }
+                LRESULT(1)
+            } else {
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
         }
         WM_LBUTTONDOWN => {
             let (x, y) = mouse_point_dip(lparam, state.dpi);
@@ -2190,11 +2219,17 @@ unsafe extern "system" fn window_proc(
         }
         WM_LBUTTONUP => {
             let was_dragging_scrollbar = state.dragging_scrollbar.is_some();
-            let was_dragging = state.dragging_slider.is_some() || was_dragging_scrollbar;
+            let was_dragging = state.dragging_slider.is_some()
+                || was_dragging_scrollbar
+                || state.dragging_resize.is_some();
             if state.dragging_slider.take().is_some() {
                 unsafe {
                     resize_window_in_place(state);
                 }
+            }
+            if state.dragging_resize.take().is_some() {
+                // The drag is the authoritative size; keep it across restarts.
+                let _ = save_config(state.config);
             }
             state.dragging_scrollbar = None;
             if was_dragging {
@@ -2312,9 +2347,12 @@ unsafe fn show_picker(
     unsafe {
         state.update_results();
         position_near_cursor(state);
+        // Positioning settles the DPI for the monitor the picker lands on;
+        // make the device agree before anything is drawn.
+        apply_device_dpi(state);
         // Render before showing: the window otherwise appears as an empty
         // frame until the first WM_PAINT lands.
-        render_and_present(state);
+        render_frame(state);
         let _ = ShowWindow(state.hwnd, SW_SHOWNOACTIVATE);
         arm_focus_watch(state);
         if let Err(error) = start_keyboard_capture(state) {
@@ -2323,6 +2361,16 @@ unsafe fn show_picker(
             return;
         }
         let _ = InvalidateRect(Some(state.hwnd), None, false);
+    }
+}
+
+/// Point the device at the window's current DPI and resize the swap chain to
+/// match the client area.
+unsafe fn apply_device_dpi(state: &mut AppState) {
+    let dpi = unsafe { GetDpiForWindow(state.hwnd) }.max(96);
+    state.dpi = dpi;
+    unsafe {
+        resize_swapchain(state);
     }
 }
 
@@ -3225,7 +3273,6 @@ unsafe fn route_wheel(state: &mut AppState, horizontal: bool, wparam: WPARAM, lp
     if state.view != View::Search || !state.browsing() {
         return;
     }
-    state.last_wheel = Some(Instant::now());
     let notches = ((wparam.0 >> 16) as u16 as i16 as f32) / 120.0;
     // Wheel messages carry the cursor position in screen coordinates.
     let mut point = POINT {
@@ -3351,7 +3398,7 @@ fn search_clear_rect(width: i32) -> D2D_RECT_F {
 fn footer_button_rects(width: i32, footer_top: i32) -> (D2D_RECT_F, D2D_RECT_F) {
     let top = footer_top as f32 + 8.0;
     let bottom = footer_top as f32 + 34.0;
-    let close_right = width as f32 - 12.0;
+    let close_right = width as f32 - 26.0;
     let close_left = close_right - 104.0;
     let insert_right = close_left - 8.0;
     let insert_left = insert_right - 60.0;
@@ -3418,10 +3465,12 @@ fn settings_footer_rects(width: i32, footer_top: i32) -> (D2D_RECT_F, D2D_RECT_F
             134.0,
             footer_top as f32 + 35.0,
         ),
+        // The right edge stops short of the corner so the resize grip has
+        // room of its own.
         rect(
-            width as f32 - 68.0,
+            width as f32 - 82.0,
             footer_top as f32 + 7.0,
-            width as f32 - 12.0,
+            width as f32 - 26.0,
             footer_top as f32 + 35.0,
         ),
     )
@@ -3482,6 +3531,17 @@ fn tone_picker_layout(state: &AppState, picker: &TonePicker) -> (D2D_RECT_F, [D2
     (popup, tiles)
 }
 
+/// The drag handle in the bottom-right corner, in layout coordinates.
+fn resize_grip_rect(state: &AppState) -> D2D_RECT_F {
+    let (width, height) = state.dimensions();
+    rect(
+        width as f32 - RESIZE_GRIP - 2.0,
+        height as f32 - RESIZE_GRIP - 2.0,
+        width as f32 - 2.0,
+        height as f32 - 2.0,
+    )
+}
+
 fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
     let (width, _) = state.dimensions();
     if let Some(picker) = &state.tone_picker {
@@ -3523,15 +3583,16 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
             }
         }
         let (discard, reset, back) = settings_footer_rects(width, state.footer_top());
-        return if contains(discard, x, y) {
-            Some(HitTarget::SettingsDiscard)
-        } else if contains(reset, x, y) {
-            Some(HitTarget::SettingsReset)
-        } else if contains(back, x, y) {
-            Some(HitTarget::SettingsBack)
-        } else {
-            None
-        };
+        if contains(discard, x, y) {
+            return Some(HitTarget::SettingsDiscard);
+        }
+        if contains(reset, x, y) {
+            return Some(HitTarget::SettingsReset);
+        }
+        if contains(back, x, y) {
+            return Some(HitTarget::SettingsBack);
+        }
+        return contains(resize_grip_rect(state), x, y).then_some(HitTarget::ResizeGrip);
     }
     let (insert, insert_close) = footer_button_rects(width, state.footer_top());
     if contains(insert, x, y) {
@@ -3539,6 +3600,9 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
     }
     if contains(insert_close, x, y) {
         return Some(HitTarget::InsertClose);
+    }
+    if contains(resize_grip_rect(state), x, y) {
+        return Some(HitTarget::ResizeGrip);
     }
     if state.query().trim().is_empty() {
         if let Some((left, right)) = category_edge_rects(width) {
@@ -3607,6 +3671,47 @@ unsafe fn update_hover(state: &mut AppState, x: f32, y: f32) {
             let _ = InvalidateRect(Some(state.hwnd), None, false);
         }
     }
+}
+
+/// Resize the window to follow the cursor while the corner grip is dragged.
+/// The picker draws its own frame, so sizing is done here rather than by
+/// handing the system a resize border it would draw over.
+unsafe fn update_dragged_resize(state: &mut AppState) {
+    let Some((offset_x, offset_y)) = state.dragging_resize else {
+        return;
+    };
+    let mut cursor = POINT::default();
+    let mut window = RECT::default();
+    if unsafe { GetCursorPos(&mut cursor) }.is_err()
+        || unsafe { GetWindowRect(state.hwnd, &mut window) }.is_err()
+    {
+        return;
+    }
+    let width = ((cursor.x + offset_x - window.left) * 96 / state.dpi as i32)
+        .clamp(MIN_PICKER_WIDTH, MAX_PICKER_WIDTH);
+    let height = ((cursor.y + offset_y - window.top) * 96 / state.dpi as i32)
+        .clamp(MIN_PICKER_HEIGHT, MAX_PICKER_HEIGHT);
+    if (width, height) == state.dimensions() {
+        return;
+    }
+    state.config.dimensions.width = width;
+    state.config.dimensions.height = height;
+    state.display_dimensions = state.config.dimensions;
+    unsafe {
+        SetWindowPos(
+            state.hwnd,
+            None,
+            0,
+            0,
+            scale(width, state.dpi),
+            scale(height, state.dpi),
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .ok();
+        layout(state);
+    }
+    state.clamp_browse_scroll();
+    state.needs_render = true;
 }
 
 unsafe fn update_dragged_slider(state: &mut AppState, x: f32) {
@@ -3753,18 +3858,53 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
                 update_dragged_slider(state, x);
             }
         }
+        HitTarget::ResizeGrip => {
+            let mut cursor = POINT::default();
+            let mut window = RECT::default();
+            if unsafe { GetCursorPos(&mut cursor) }.is_ok()
+                && unsafe { GetWindowRect(state.hwnd, &mut window) }.is_ok()
+            {
+                state.dragging_resize = Some((window.right - cursor.x, window.bottom - cursor.y));
+                unsafe {
+                    let _ = SetCapture(state.hwnd);
+                }
+            }
+        }
         HitTarget::SettingsDiscard => unsafe { discard_settings(state) },
         HitTarget::SettingsReset => unsafe { reset_settings(state) },
         HitTarget::SettingsBack => unsafe { save_settings(state) },
     }
 }
 
+/// Validate the update region and mark the frame dirty. Rendering itself
+/// happens once per display refresh in the message loop: presenting straight
+/// from here would put one present on the queue per input event, which the
+/// driver has to buffer.
 unsafe fn paint(state: &mut AppState) {
     let mut paint = PAINTSTRUCT::default();
     unsafe {
         BeginPaint(state.hwnd, &mut paint);
-        render_and_present(state);
         let _ = EndPaint(state.hwnd, &paint);
+    }
+    state.needs_render = true;
+}
+
+/// Wait for the compositor to accept a frame, then draw and present one.
+/// Every present in the process goes through here, so the frame-latency
+/// waitable object is always honoured.
+unsafe fn render_frame(state: &mut AppState) {
+    if unsafe { ensure_render_target(state) }.is_err() {
+        state.needs_render = false;
+        return;
+    }
+    if let Some(resources) = &state.render {
+        unsafe {
+            let _ = WaitForSingleObject(resources.frame_gate.0, 33);
+        }
+    }
+    state.needs_render = false;
+    unsafe {
+        render_and_present(state);
     }
 }
 
@@ -3927,11 +4067,15 @@ unsafe fn resize_swapchain(state: &mut AppState) {
                 DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
             )
             .is_err()
-            || attach_swapchain_target(&resources.context, &resources.swapchain, state.dpi)
-                .is_err()
+            || attach_swapchain_target(&resources.context, &resources.swapchain, state.dpi).is_err()
         {
             state.render = None;
+            return;
         }
+        // The device may have been built while the window was still hidden
+        // at the default DPI; without this the layout is drawn at the wrong
+        // scale and leaves the frame partly empty.
+        resources.context.SetDpi(state.dpi as f32, state.dpi as f32);
     }
 }
 
@@ -3966,21 +4110,14 @@ unsafe fn render_animation_frame(state: &mut AppState) {
         state.last_frame = None;
         return;
     }
-    if let Some(resources) = &state.render {
-        unsafe {
-            let _ = WaitForSingleObject(resources.frame_gate.0, 33);
-        }
-    }
     let now = Instant::now();
-    let dt = state
-        .last_frame
-        .map_or(1.0 / 120.0, |last| {
-            now.duration_since(last).as_secs_f32().clamp(0.001, 0.05)
-        });
+    let dt = state.last_frame.map_or(1.0 / 120.0, |last| {
+        now.duration_since(last).as_secs_f32().clamp(0.001, 0.05)
+    });
     state.last_frame = Some(now);
     unsafe {
         state.tick_browse_scroll(dt);
-        render_and_present(state);
+        render_frame(state);
     }
 }
 
@@ -4094,8 +4231,6 @@ fn cold_glyphs(state: &AppState, resources: &RenderResources) -> Vec<usize> {
 enum WarmOutcome {
     /// Rasterized at least one glyph; come back as soon as input allows.
     Worked,
-    /// Glyphs are still missing but warming must hold off this long.
-    Waiting(u32),
     /// Nothing left to rasterize; the loop may sleep until input arrives.
     Done,
 }
@@ -4108,15 +4243,6 @@ unsafe fn warm_glyph_slice(state: &mut AppState) -> WarmOutcome {
         return WarmOutcome::Done;
     }
     let visible = unsafe { IsWindowVisible(state.hwnd) }.as_bool();
-    // A gesture still in flight owns the input thread outright. Come back
-    // once it has been quiet, rather than sleeping until unrelated input
-    // happens to arrive and leaving the tiles it uncovered blank.
-    if visible && let Some(last) = state.last_wheel {
-        let quiet = Duration::from_millis(WARM_GESTURE_QUIET_MS);
-        if let Some(remaining) = quiet.checked_sub(last.elapsed()) {
-            return WarmOutcome::Waiting(remaining.as_millis() as u32 + 1);
-        }
-    }
     let Ok(resources) = (unsafe { ensure_render_target(state) }) else {
         return WarmOutcome::Done;
     };
@@ -4141,9 +4267,7 @@ unsafe fn warm_glyph_slice(state: &mut AppState) -> WarmOutcome {
         return WarmOutcome::Done;
     }
     if visible {
-        unsafe {
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        state.needs_render = true;
     }
     WarmOutcome::Worked
 }
@@ -4338,6 +4462,7 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
             &brushes.primary,
             &state.formats.center,
         );
+        draw_resize_grip(state, &target, &brushes);
         draw_tone_picker(state, &target, &brushes);
         draw_hover_help(
             state,
@@ -4896,18 +5021,20 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
                     &state.formats.metadata,
                 );
             } else {
-                draw_text(
+                draw_setting_value(
+                    state,
                     &target,
-                    &format!("‹  {value}  ›"),
-                    &state.formats.brand,
+                    index,
+                    value,
                     rect(
                         width as f32 * 0.42,
                         bounds.top,
                         width as f32 - 24.0,
                         bounds.bottom,
                     ),
+                    &primary,
                     &secondary,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    &selection_border,
                 );
             }
         }
@@ -4986,6 +5113,7 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
             &primary,
             &state.formats.center,
         );
+        draw_resize_grip(state, &target, &brushes);
         target.EndDraw(None, None)?;
     }
     Ok(())
@@ -5054,6 +5182,170 @@ unsafe fn draw_button(
             text,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
         );
+    }
+}
+
+/// The sample entry every settings preview is drawn from.
+const PREVIEW_GLYPH: &str = "👋";
+
+/// Draw a settings value between its adjust arrows. Settings that change how
+/// something looks show that thing rather than naming it: the hover line is
+/// rendered as it will appear, the emoji font and skin tone are shown on a
+/// sample glyph.
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_setting_value(
+    state: &AppState,
+    target: &ID2D1RenderTarget,
+    index: usize,
+    value: &str,
+    bounds: D2D_RECT_F,
+    primary: &ID2D1SolidColorBrush,
+    secondary: &ID2D1SolidColorBrush,
+    selection_border: &ID2D1SolidColorBrush,
+) {
+    unsafe {
+        draw_text(
+            target,
+            "‹",
+            &state.formats.brand,
+            rect(bounds.left, bounds.top, bounds.left + 14.0, bounds.bottom),
+            secondary,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+        draw_text(
+            target,
+            "›",
+            &state.formats.brand,
+            rect(bounds.right - 14.0, bounds.top, bounds.right, bounds.bottom),
+            secondary,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+    }
+    let inner = rect(
+        bounds.left + 16.0,
+        bounds.top,
+        bounds.right - 16.0,
+        bounds.bottom,
+    );
+    match index {
+        // Hover details: the line the footer will actually show.
+        2 => unsafe {
+            draw_text(
+                target,
+                &preview_details_line(state),
+                &state.formats.metadata,
+                inner,
+                primary,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            );
+        },
+        // Emoji font: the same glyphs under the chosen face.
+        3 => unsafe {
+            let sample = rect(inner.left, inner.top, inner.left + 74.0, inner.bottom);
+            draw_text(
+                target,
+                "😀 ✋ 🚀",
+                &state.formats.glyph_small,
+                sample,
+                primary,
+                if state.config.emoji_font == EmojiFont::SegoeEmoji {
+                    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT
+                } else {
+                    D2D1_DRAW_TEXT_OPTIONS_NONE
+                },
+            );
+            draw_text(
+                target,
+                value,
+                &state.formats.metadata,
+                rect(sample.right + 6.0, inner.top, inner.right, inner.bottom),
+                secondary,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            );
+        },
+        // Skin tone: every tone on one glyph, the active one ringed.
+        4 => {
+            let step = ((inner.right - inner.left) / SkinTone::ALL.len() as f32).min(26.0);
+            let strip =
+                inner.left + ((inner.right - inner.left) - step * SkinTone::ALL.len() as f32) / 2.0;
+            for (position, tone) in SkinTone::ALL.iter().enumerate() {
+                let left = strip + position as f32 * step;
+                let cell = rect(left, inner.top + 2.0, left + step, inner.bottom - 2.0);
+                if *tone == state.config.skin_tone {
+                    unsafe {
+                        target.DrawRoundedRectangle(
+                            &rounded_rect(cell.left, cell.top, cell.right, cell.bottom, 6.0),
+                            selection_border,
+                            1.2,
+                            None,
+                        );
+                    }
+                }
+                let toned = catalog::toned(PREVIEW_GLYPH, *tone).unwrap_or(PREVIEW_GLYPH);
+                unsafe {
+                    draw_text(
+                        target,
+                        toned,
+                        &state.formats.glyph_small,
+                        cell,
+                        primary,
+                        D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+                    );
+                }
+            }
+        }
+        _ => unsafe {
+            draw_text(
+                target,
+                value,
+                &state.formats.brand,
+                inner,
+                secondary,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            );
+        },
+    }
+}
+
+/// The footer line for the sample glyph under the current detail mode.
+fn preview_details_line(state: &AppState) -> String {
+    let name = "waving hand";
+    match state.config.details {
+        DetailMode::None => name.to_string(),
+        DetailMode::Type => format!("{name}  Emoji"),
+        DetailMode::Codepoint => format!("{name}  {}", codepoints(PREVIEW_GLYPH)),
+        DetailMode::Both => format!("{name}  {}  Emoji", codepoints(PREVIEW_GLYPH)),
+    }
+}
+
+/// Three stacked diagonals in the bottom-right corner marking the drag
+/// handle, brighter while hovered or dragging.
+unsafe fn draw_resize_grip(state: &AppState, target: &ID2D1RenderTarget, brushes: &Brushes) {
+    let grip = resize_grip_rect(state);
+    let active = matches!(state.hovered_target, Some(HitTarget::ResizeGrip))
+        || state.dragging_resize.is_some();
+    let brush = if active {
+        &brushes.primary
+    } else {
+        &brushes.surface_border
+    };
+    for step in 0..3 {
+        let inset = 3.0 + step as f32 * 4.5;
+        unsafe {
+            target.DrawLine(
+                Vector2 {
+                    X: grip.right - inset,
+                    Y: grip.bottom,
+                },
+                Vector2 {
+                    X: grip.right,
+                    Y: grip.bottom - inset,
+                },
+                brush,
+                1.4,
+                None,
+            );
+        }
     }
 }
 
