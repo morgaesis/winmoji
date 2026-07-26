@@ -18,6 +18,7 @@ Run `winmoji.exe` to show the picker. The default global shortcut is `Ctrl+Shift
 - Press Enter to insert the selected text and close the picker.
 - Press Shift+Enter to insert the selected text and keep the picker open.
 - Press Ctrl+C to copy the selected text to the clipboard and close, or Ctrl+Shift+C to copy and keep the picker open. Copying works where inserting cannot, such as into an elevated application.
+- The footer shows Copy and Insert beside a Shift cap. Holding Shift lights the cap and both buttons change to their keep-open form; clicking the cap holds that state without the key.
 - Press Ctrl+= or Ctrl+- to resize the text. Everything scales together, and the size is saved.
 - Clear the search or press Ctrl+G to browse the continuously scrolling catalog in the same window.
 - Emoji follow the Unicode CLDR groups for smileys, people, animals, food, travel, activities, objects, and flags. Symbols holds the CLDR emoji symbols, Characters holds the broad Unicode catalog of arrows, math, currency, punctuation and Greek, and Emoticons has its own group.
@@ -27,7 +28,7 @@ Run `winmoji.exe` to show the picker. The default global shortcut is `Ctrl+Shift
 - Grid rows are rendered on demand for the visible viewport, so large categories do not create work for offscreen emoji during scrolling.
 - Hover or focus a character to show its configured name, code point, and type in the footer.
 - Hover category icons and buttons for their labels and shortcuts, including the Enter and Shift+Enter insert hints.
-- Press Ctrl+, or click the settings button to configure the picker.
+- Press Ctrl+, or click the settings button to configure the picker. The Keyboard shortcuts row lists every action and the chord that runs it; Enter or a click rebinds the focused one, and a chord another action already owns is refused rather than taken. The arrow keys always move the selection and the search field always takes typing, so neither is rebindable.
 - Press Escape, click outside the picker, or switch to another window to close without inserting.
 - PrintScreen and Win-key shortcuts pass through while the picker is open, so system screenshots keep working.
 
@@ -51,7 +52,7 @@ skin_tone = "default"
 
 Supported modifiers are `Ctrl`, `Alt`, `Shift`, and `Win`. The key can be a letter, digit, `F1` through `F24`, `Space`, `Enter`, `Tab`, `Escape`, or common punctuation. Punctuation accepts its literal form or the names `period`, `comma`, `slash`, `backslash`, `semicolon`, `apostrophe`, `minus`, `equals`, `left bracket`, `right bracket`, and `grave`. The configured shortcut always uses `MOD_NOREPEAT`.
 
-`width` accepts 360 through 920. `height` accepts 300 through 760. `font_scale` is a percentage from 80 through 160. Values are clamped to the active monitor work area. `details` accepts `none`, `type`, `codepoint`, or `both`. `emoji_font` accepts `Segoe UI Emoji` or `Segoe UI Symbol`. `skin_tone` accepts `default`, `light`, `medium-light`, `medium`, `medium-dark`, or `dark`.
+`width` accepts 360 through 920. `height` accepts 300 through 760. `font_scale` is a percentage from 80 through 160. Each action's binding is a `key_<action>` line written in the same form as `hotkey`; unlike `hotkey` these may be bare keys, except for keys that would otherwise be typed into the search field. Values are clamped to the active monitor work area. `details` accepts `none`, `type`, `codepoint`, or `both`. `emoji_font` accepts `Segoe UI Emoji` or `Segoe UI Symbol`. `skin_tone` accepts `default`, `light`, `medium-light`, `medium`, `medium-dark`, or `dark`.
 
 The settings panel changes all of these values without editing the file. Enter changes the focused value with wrap-around, and value changes preview immediately. Escape and the Back button save and return to the picker. Discard restores the values from when settings opened. Reset restores stock defaults and keeps settings open for inspection.
 

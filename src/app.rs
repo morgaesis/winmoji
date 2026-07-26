@@ -119,10 +119,11 @@ use windows_numerics::Vector2;
 
 use crate::catalog::{self, Match};
 use crate::config::{
-    Config, DetailMode, EmojiFont, FONT_SCALE_STEP, Hotkey, MAX_FONT_SCALE, MAX_PICKER_HEIGHT,
-    MAX_PICKER_WIDTH, MIN_FONT_SCALE, MIN_PICKER_HEIGHT, MIN_PICKER_WIDTH, MOD_ALT_VALUE,
-    MOD_CONTROL_VALUE, MOD_NOREPEAT_VALUE, MOD_SHIFT_VALUE, MOD_WIN_VALUE, PickerDimensions,
-    RecentGlyph, SkinTone, load_config, load_recents, remember_recent, save_config,
+    Action, Binding, Config, DetailMode, EmojiFont, FONT_SCALE_STEP, Hotkey, Keybinds,
+    MAX_FONT_SCALE, MAX_PICKER_HEIGHT, MAX_PICKER_WIDTH, MIN_FONT_SCALE, MIN_PICKER_HEIGHT,
+    MIN_PICKER_WIDTH, MOD_ALT_VALUE, MOD_CONTROL_VALUE, MOD_NOREPEAT_VALUE, MOD_SHIFT_VALUE,
+    MOD_WIN_VALUE, PickerDimensions, RecentGlyph, SkinTone, load_config, load_recents,
+    remember_recent, save_config,
 };
 
 const CLASS_NAME: PCWSTR = w!("WinMojiPickerWindow");
@@ -144,6 +145,9 @@ const CATEGORY_EDGE_WIDTH: f32 = 24.0;
 const BROWSE_CONTENT_TOP: i32 = 118;
 const FOOTER_HEIGHT: i32 = 42;
 const RESULT_ROW_HEIGHT: i32 = 40;
+/// Geometry of the shortcut list.
+const SHORTCUT_LIST_TOP: i32 = 42;
+const SHORTCUT_ROW_HEIGHT: i32 = 32;
 const SCROLLBAR_THUMB_WIDTH: f32 = 5.0;
 /// Extra width the thumb takes on while hovered or dragged, giving the
 /// pointer a larger target once it is already there.
@@ -160,18 +164,9 @@ const SECTION_HEADING_HEIGHT: i32 = 26;
 const SECTION_GAP: i32 = 10;
 const RESULTS_ID: usize = 2;
 const VK_A_VALUE: u16 = 0x41;
-const VK_C_VALUE: u16 = 0x43;
-const VK_D_VALUE: u16 = 0x44;
-const VK_G_VALUE: u16 = 0x47;
-const VK_U_VALUE: u16 = 0x55;
 const VK_V_VALUE: u16 = 0x56;
-const VK_H_VALUE: u16 = 0x48;
 const VK_J_VALUE: u16 = 0x4a;
 const VK_K_VALUE: u16 = 0x4b;
-const VK_L_VALUE: u16 = 0x4c;
-const VK_OEM_COMMA_VALUE: u16 = 0xbc;
-const VK_OEM_MINUS_VALUE: u16 = 0xbd;
-const VK_OEM_PLUS_VALUE: u16 = 0xbb;
 const FOCUS_TIMER_ID: usize = 0x0057_4d02;
 const FOCUS_FRAME_MS: u32 = 100;
 const GLYPH_TILE: f32 = 44.0;
@@ -286,6 +281,7 @@ enum Mode {
 enum View {
     Search,
     Settings,
+    Shortcuts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -462,7 +458,7 @@ fn slider_bounds(config: Config, index: usize) -> Option<(i32, i32, i32)> {
 }
 
 /// How many rows the settings view has.
-const SETTINGS_ROWS: usize = 7;
+const SETTINGS_ROWS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HitTarget {
@@ -477,8 +473,8 @@ enum HitTarget {
     BrowseItem { section: usize, item: usize },
     Scrollbar,
     Copy,
-    InsertKeep,
     Insert,
+    ShiftCap,
     ToneOption(usize),
     TonePopup,
     SettingRow(usize),
@@ -486,6 +482,9 @@ enum HitTarget {
     SettingsDiscard,
     SettingsReset,
     SettingsBack,
+    ShortcutRow(usize),
+    ShortcutsReset,
+    ShortcutsBack,
     ResizeGrip,
 }
 
@@ -869,6 +868,11 @@ struct AppState {
     /// widths. Eased where it is used, so the growth is symmetric in both
     /// directions.
     scrollbar_grip: f32,
+    /// Whether Shift is down, and whether the footer's Shift cap has been
+    /// clicked to latch it. Either one puts the footer actions into their
+    /// keep-open form.
+    shift_held: bool,
+    shift_latched: bool,
     category_scroll: f32,
     active_category: usize,
     hovered_entry: Option<usize>,
@@ -876,6 +880,13 @@ struct AppState {
     tone_picker: Option<TonePicker>,
     category_icon_entries: [Option<usize>; BrowseCategory::ALL.len()],
     settings_selected: usize,
+    /// Row of the shortcut list that has focus, and how far the list is
+    /// scrolled, in DIPs.
+    shortcut_selected: usize,
+    shortcut_scroll: f32,
+    /// Which action a capture in progress will bind. `None` while capturing
+    /// means the capture belongs to the global open shortcut.
+    capturing_action: Option<Action>,
     settings_original: Config,
     /// Index of the settings row whose slider is being dragged.
     dragging_slider: Option<usize>,
@@ -1065,6 +1076,8 @@ impl AppState {
             browse_scroll_target: 0.0,
             result_scroll: 0.0,
             scrollbar_grip: 0.0,
+            shift_held: false,
+            shift_latched: false,
             browse_animation: ScrollAnimation::Idle,
             category_scroll: 0.0,
             active_category: 0,
@@ -1082,6 +1095,9 @@ impl AppState {
                     .flatten()
             }),
             settings_selected: 0,
+            shortcut_selected: 0,
+            shortcut_scroll: 0.0,
+            capturing_action: None,
             settings_original: config,
             dragging_slider: None,
             dragging_scrollbar: None,
@@ -1468,6 +1484,38 @@ impl AppState {
         self.usage = usage_counts(&self.recents);
     }
 
+    fn shortcut_viewport(&self) -> f32 {
+        (self.footer_top() - SHORTCUT_LIST_TOP).max(1) as f32
+    }
+
+    fn total_shortcut_height(&self) -> f32 {
+        Action::ALL.len() as f32 * SHORTCUT_ROW_HEIGHT as f32
+    }
+
+    fn maximum_shortcut_scroll(&self) -> f32 {
+        (self.total_shortcut_height() - self.shortcut_viewport()).max(0.0)
+    }
+
+    fn clamp_shortcut_scroll(&mut self) {
+        self.shortcut_scroll = self
+            .shortcut_scroll
+            .clamp(0.0, self.maximum_shortcut_scroll());
+    }
+
+    unsafe fn set_shortcut_scroll_immediate(&mut self, position: f32) {
+        self.shortcut_scroll = position;
+        self.clamp_shortcut_scroll();
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
+    }
+
+    /// Whether the footer actions are in their keep-open form. Holding Shift
+    /// and clicking the Shift cap are the same switch reached two ways.
+    fn keep_open(&self) -> bool {
+        self.shift_held || self.shift_latched
+    }
+
     fn list_content_top(&self) -> i32 {
         if self.browsing() {
             BROWSE_CONTENT_TOP
@@ -1693,11 +1741,17 @@ impl AppState {
             View::Settings => vec![
                 format!("Width, {}", self.config.dimensions.width),
                 format!("Height, {}", self.config.dimensions.height),
+                format!("Text size, {} percent", self.config.font_scale),
                 format!("Hover details, {}", self.config.details),
                 format!("Emoji font, {}", self.config.emoji_font),
                 format!("Skin tone, {}", self.config.skin_tone),
+                format!("Keyboard shortcuts, {} actions", Action::ALL.len()),
                 format!("Open shortcut, {}", self.config.hotkey),
             ],
+            View::Shortcuts => Action::ALL
+                .iter()
+                .map(|action| format!("{}, {}", action.label(), self.config.keys.get(*action)))
+                .collect::<Vec<_>>(),
         };
         for value in labels {
             let label = to_wide(&value);
@@ -1957,10 +2011,10 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
                     let key = VIRTUAL_KEY(message.wParam.0 as u16);
                     let control = GetKeyState(VK_CONTROL.0 as i32) < 0;
                     let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
-                    let handled = if state.view == View::Settings {
-                        handle_settings_key(state, key, control)
-                    } else {
-                        handle_picker_key(state, key, control, shift)
+                    let handled = match state.view {
+                        View::Settings => handle_settings_key(state, key, control),
+                        View::Shortcuts => handle_shortcuts_key(state, key, control),
+                        View::Search => handle_picker_key(state, key, control, shift),
                     };
                     if handled {
                         continue;
@@ -2308,6 +2362,7 @@ unsafe extern "system" fn window_proc(
                     View::Search if browsing => visible_browse.as_ref().map_or(0, Vec::len),
                     View::Search => state.matches.len(),
                     View::Settings => SETTINGS_ROWS,
+                    View::Shortcuts => Action::ALL.len(),
                 };
                 if selected >= 0 && (selected as usize) < item_count {
                     if browsing {
@@ -2594,6 +2649,8 @@ unsafe fn hide_picker(state: &mut AppState) {
     state.browse_scroll_target = state.browse_scroll;
     state.browse_animation = ScrollAnimation::Idle;
     state.scrollbar_grip = 0.0;
+    state.shift_held = false;
+    state.shift_latched = false;
     state.last_frame = None;
     unsafe {
         stop_keyboard_capture(state);
@@ -2623,6 +2680,170 @@ unsafe fn focus_browser(state: &mut AppState) {
         state.rebuild_browse_sections();
         state.update_results();
     }
+}
+
+/// Row geometry of the shortcut list, before scrolling is applied.
+fn shortcut_row_rect(width: i32, index: usize) -> D2D_RECT_F {
+    let top = SHORTCUT_LIST_TOP as f32 + index as f32 * SHORTCUT_ROW_HEIGHT as f32;
+    rect(
+        12.0,
+        top,
+        width as f32 - 16.0,
+        top + SHORTCUT_ROW_HEIGHT as f32 - 4.0,
+    )
+}
+
+unsafe fn enter_shortcuts(state: &mut AppState) {
+    state.view = View::Shortcuts;
+    state.status = None;
+    state.shortcut_selected = 0;
+    state.shortcut_scroll = 0.0;
+    state.capturing_action = None;
+    set_capturing_shortcut(state, false);
+    unsafe {
+        state.sync_accessible_results();
+        let _ = InvalidateRect(Some(state.hwnd), None, false);
+    }
+}
+
+/// Leave the list and go back to the settings page that opened it.
+unsafe fn leave_shortcuts(state: &mut AppState) {
+    state.capturing_action = None;
+    set_capturing_shortcut(state, false);
+    state.status = None;
+    unsafe {
+        enter_settings(state);
+    }
+    state.settings_selected = 6;
+    state.selected = 6;
+    unsafe {
+        state.sync_accessible_results();
+        let _ = InvalidateRect(Some(state.hwnd), None, false);
+    }
+}
+
+unsafe fn begin_capture(state: &mut AppState, action: Action) {
+    state.capturing_action = Some(action);
+    set_capturing_shortcut(state, true);
+    state.status = Some(format!("Press the new shortcut for {}", action.label()));
+    unsafe {
+        let _ = InvalidateRect(Some(state.hwnd), None, false);
+    }
+}
+
+unsafe fn reset_shortcuts(state: &mut AppState) {
+    state.config.keys = Keybinds::default();
+    state.capturing_action = None;
+    set_capturing_shortcut(state, false);
+    state.status = Some("Shortcuts reset".to_string());
+    unsafe {
+        state.sync_accessible_results();
+        let _ = InvalidateRect(Some(state.hwnd), None, false);
+    }
+}
+
+unsafe fn move_shortcut_selection(state: &mut AppState, delta: isize) {
+    state.shortcut_selected = state
+        .shortcut_selected
+        .saturating_add_signed(delta)
+        .min(Action::ALL.len() - 1);
+    let row = SHORTCUT_ROW_HEIGHT as f32;
+    let top = state.shortcut_selected as f32 * row;
+    let viewport = state.shortcut_viewport();
+    if top < state.shortcut_scroll {
+        state.shortcut_scroll = top;
+    } else if top + row > state.shortcut_scroll + viewport {
+        state.shortcut_scroll = top + row - viewport;
+    }
+    state.clamp_shortcut_scroll();
+    unsafe {
+        state.sync_accessible_results();
+        let _ = InvalidateRect(Some(state.hwnd), None, false);
+    }
+}
+
+/// Record a captured chord against the action being rebound. A chord another
+/// action owns is refused rather than stolen, so no action is left
+/// unreachable by a rebind the user cannot see.
+unsafe fn apply_captured_binding(state: &mut AppState, action: Action, key: VIRTUAL_KEY) {
+    let modifiers = if state.capture_active {
+        captured_hotkey_modifiers(&state.keyboard_state)
+    } else {
+        current_hotkey_modifiers()
+    };
+    let result = Binding::from_parts(modifiers & !MOD_NOREPEAT_VALUE, key.0 as u32)
+        .and_then(|binding| state.config.keys.set(action, binding));
+    match result {
+        Ok(()) => {
+            state.capturing_action = None;
+            set_capturing_shortcut(state, false);
+            state.status = None;
+            if let Err(error) = save_config(state.config) {
+                state.status = Some(format!("Could not save shortcuts: {error}"));
+            }
+        }
+        Err(error) => state.status = Some(error),
+    }
+    unsafe {
+        state.sync_accessible_results();
+        let _ = InvalidateRect(Some(state.hwnd), None, false);
+    }
+}
+
+unsafe fn handle_shortcuts_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool) -> bool {
+    if state.capturing_shortcut {
+        if key == VK_ESCAPE {
+            state.capturing_action = None;
+            set_capturing_shortcut(state, false);
+            state.status = None;
+            unsafe {
+                let _ = InvalidateRect(Some(state.hwnd), None, false);
+            }
+            return true;
+        }
+        if matches!(key, VK_CONTROL | VK_SHIFT | VK_MENU | VK_LWIN | VK_RWIN) {
+            return true;
+        }
+        if let Some(action) = state.capturing_action {
+            unsafe {
+                apply_captured_binding(state, action, key);
+            }
+        }
+        return true;
+    }
+    if key == VK_ESCAPE {
+        unsafe {
+            leave_shortcuts(state);
+        }
+        return true;
+    }
+    if key == VK_RETURN {
+        let action = Action::ALL[state.shortcut_selected.min(Action::ALL.len() - 1)];
+        unsafe {
+            begin_capture(state, action);
+        }
+        return true;
+    }
+    if key == VK_UP || (control && key.0 == VK_K_VALUE) {
+        unsafe {
+            move_shortcut_selection(state, -1);
+        }
+        return true;
+    }
+    if key == VK_DOWN || (control && key.0 == VK_J_VALUE) {
+        unsafe {
+            move_shortcut_selection(state, 1);
+        }
+        return true;
+    }
+    if key == VK_PRIOR || key == VK_NEXT {
+        let rows = (state.shortcut_viewport() / SHORTCUT_ROW_HEIGHT as f32).max(1.0) as isize;
+        unsafe {
+            move_shortcut_selection(state, if key == VK_PRIOR { -rows } else { rows });
+        }
+        return true;
+    }
+    key == VK_TAB
 }
 
 unsafe fn enter_settings(state: &mut AppState) {
@@ -2748,7 +2969,12 @@ unsafe fn activate_setting(state: &mut AppState) {
         5 => {
             state.config.skin_tone = state.config.skin_tone.cycled();
         }
-        6 => {
+        6 => unsafe {
+            enter_shortcuts(state);
+            return;
+        },
+        7 => {
+            state.capturing_action = None;
             set_capturing_shortcut(state, true);
             state.status = Some("Press the new shortcut".to_string());
         }
@@ -2854,6 +3080,15 @@ unsafe fn handle_captured_key(
     key_up: bool,
 ) {
     update_captured_keyboard_state(&mut state.keyboard_state, key, key_up);
+    // The footer follows Shift as it is held, so a change repaints even
+    // though modifiers themselves run nothing.
+    let shift_now = captured_key_down(&state.keyboard_state, VK_SHIFT);
+    if shift_now != state.shift_held {
+        state.shift_held = shift_now;
+        unsafe {
+            let _ = InvalidateRect(Some(state.hwnd), None, false);
+        }
+    }
     if key_up {
         if state.pending_commit.is_some() && captured_commit_keys_released(&state.keyboard_state) {
             let close_after = state.pending_commit.take().unwrap_or(false);
@@ -2871,6 +3106,12 @@ unsafe fn handle_captured_key(
     if state.view == View::Settings {
         unsafe {
             handle_settings_key(state, key, control);
+        }
+        return;
+    }
+    if state.view == View::Shortcuts {
+        unsafe {
+            handle_shortcuts_key(state, key, control);
         }
         return;
     }
@@ -3072,146 +3313,134 @@ unsafe fn handle_picker_key(
     control: bool,
     shift: bool,
 ) -> bool {
-    // Ctrl+C finishes the way Ctrl+Enter does; adding Shift keeps the picker
-    // open for another pick, mirroring plain Enter.
-    if control && key.0 == VK_C_VALUE {
+    // The tone chooser is a transient popup layered over the picker, so the
+    // dismiss key closes it before it closes anything else.
+    if state
+        .config
+        .keys
+        .get(Action::Dismiss)
+        .matches(key.0 as u32, control, shift)
+        && state.tone_picker.is_some()
+    {
+        state.tone_picker = None;
         unsafe {
-            copy_selection(state, !shift);
+            let _ = InvalidateRect(Some(state.hwnd), None, false);
         }
         return true;
     }
-    if control && key.0 == VK_OEM_COMMA_VALUE {
-        unsafe {
-            enter_settings(state);
-        }
-        return true;
+    if let Some(action) = state.config.keys.action_for(key.0 as u32, control, shift) {
+        return unsafe { run_action(state, action) };
     }
-    // Ctrl+= and Ctrl+- resize the text wherever the picker is, settings
-    // included. VK_ADD and VK_SUBTRACT cover the numeric keypad.
-    if control && matches!(key.0, VK_OEM_PLUS_VALUE | VK_OEM_MINUS_VALUE | 0x6b | 0x6d) {
-        let up = matches!(key.0, VK_OEM_PLUS_VALUE | 0x6b);
-        unsafe {
-            adjust_font_scale(state, if up { 1 } else { -1 });
-        }
-        return true;
-    }
-    if control && key.0 == VK_G_VALUE {
-        unsafe {
-            focus_browser(state);
-        }
-        return true;
-    }
-    if key == VK_ESCAPE {
-        if state.tone_picker.is_some() {
-            state.tone_picker = None;
-            unsafe {
-                let _ = InvalidateRect(Some(state.hwnd), None, false);
-            }
-            return true;
-        }
-        unsafe {
-            hide_picker(state);
-        }
-        return true;
+    // The numeric keypad's own plus and minus follow the text size binding
+    // whenever that binding is on the main row's plus or minus.
+    if control && matches!(key.0, 0x6b | 0x6d) {
+        let action = if key.0 == 0x6b {
+            Action::TextBigger
+        } else {
+            Action::TextSmaller
+        };
+        return unsafe { run_action(state, action) };
     }
     if key == VK_TAB {
         return true;
     }
-
-    let browsing = state.browsing();
-    if browsing {
-        let columns = state
-            .section_layouts()
-            .get(state.browse_focus.0)
-            .map_or(1, |layout| layout.columns) as isize;
-        if key == VK_LEFT || (control && key.0 == VK_H_VALUE) {
-            unsafe {
-                state.move_browse_selection(-1);
-            }
-            return true;
-        }
-        if key == VK_RIGHT || (control && key.0 == VK_L_VALUE) {
-            unsafe {
-                state.move_browse_selection(1);
-            }
-            return true;
-        }
-        if key == VK_UP || (control && key.0 == VK_K_VALUE) {
-            unsafe {
-                state.move_browse_selection(-columns);
-            }
-            return true;
-        }
-        if key == VK_DOWN || (control && key.0 == VK_J_VALUE) {
-            unsafe {
-                state.move_browse_selection(columns);
-            }
-            return true;
-        }
-        let viewport = (state.footer_top() - BROWSE_CONTENT_TOP) as f32;
-        if control && (key.0 == VK_U_VALUE || key.0 == VK_D_VALUE) {
-            let cell = state
-                .section_layouts()
-                .get(state.browse_focus.0)
-                .map_or(state.grid_cell(), |layout| layout.cell_height)
-                .max(1);
-            let rows = ((viewport * 0.5) / cell as f32).max(1.0) as isize;
-            let jump = rows * columns;
-            unsafe {
-                state.move_browse_selection(if key.0 == VK_U_VALUE { -jump } else { jump });
-            }
-            return true;
-        }
-        if key == VK_PRIOR {
-            state.scroll_browse(-viewport * 0.88);
-            return true;
-        }
-        if key == VK_NEXT {
-            state.scroll_browse(viewport * 0.88);
-            return true;
-        }
-    } else {
-        if key == VK_UP || (control && key.0 == VK_K_VALUE) {
-            unsafe {
-                state.move_selection(-1);
-            }
-            return true;
-        }
-        if key == VK_DOWN || (control && key.0 == VK_J_VALUE) {
-            unsafe {
-                state.move_selection(1);
-            }
-            return true;
-        }
-        let viewport = state.result_viewport();
-        if control && (key.0 == VK_U_VALUE || key.0 == VK_D_VALUE) {
-            let rows = ((viewport * 0.5) / state.row_height() as f32).max(1.0) as isize;
-            unsafe {
-                state.move_selection(if key.0 == VK_U_VALUE { -rows } else { rows });
-            }
-            return true;
-        }
-        if key == VK_PRIOR {
-            unsafe {
-                state.set_result_scroll_immediate(state.result_scroll - viewport * 0.88);
-            }
-            return true;
-        }
-        if key == VK_NEXT {
-            unsafe {
-                state.set_result_scroll_immediate(state.result_scroll + viewport * 0.88);
-            }
-            return true;
-        }
-    }
-
-    if key == VK_RETURN {
-        unsafe {
-            commit_selection(state, !shift);
-        }
-        return true;
+    // Arrows are the primitive the rebindable motions are shorthand for, so
+    // they always move the selection.
+    let arrow = match key {
+        VK_UP => Some(Action::SelectUp),
+        VK_DOWN => Some(Action::SelectDown),
+        VK_LEFT => Some(Action::SelectLeft),
+        VK_RIGHT => Some(Action::SelectRight),
+        _ => None,
+    };
+    if let Some(action) = arrow {
+        return unsafe { run_action(state, action) };
     }
     false
+}
+
+/// Run one bound action. Motion means different things in the two views: the
+/// grid moves by a row of cells, the result list by a row of text.
+unsafe fn run_action(state: &mut AppState, action: Action) -> bool {
+    let browsing = state.browsing();
+    let columns = state
+        .section_layouts()
+        .get(state.browse_focus.0)
+        .map_or(1, |layout| layout.columns) as isize;
+    unsafe {
+        match action {
+            Action::Insert => commit_selection(state, true),
+            Action::InsertKeep => commit_selection(state, false),
+            Action::Copy => copy_selection(state, true),
+            Action::CopyKeep => copy_selection(state, false),
+            Action::Dismiss => hide_picker(state),
+            Action::Settings => enter_settings(state),
+            Action::Browse => focus_browser(state),
+            Action::TextBigger => adjust_font_scale(state, 1),
+            Action::TextSmaller => adjust_font_scale(state, -1),
+            Action::SelectUp => {
+                if browsing {
+                    state.move_browse_selection(-columns);
+                } else {
+                    state.move_selection(-1);
+                }
+            }
+            Action::SelectDown => {
+                if browsing {
+                    state.move_browse_selection(columns);
+                } else {
+                    state.move_selection(1);
+                }
+            }
+            Action::SelectLeft => {
+                if browsing {
+                    state.move_browse_selection(-1);
+                }
+            }
+            Action::SelectRight => {
+                if browsing {
+                    state.move_browse_selection(1);
+                }
+            }
+            Action::HalfPageUp | Action::HalfPageDown => {
+                let back = action == Action::HalfPageUp;
+                if browsing {
+                    let viewport = (state.footer_top() - BROWSE_CONTENT_TOP) as f32;
+                    let cell = state
+                        .section_layouts()
+                        .get(state.browse_focus.0)
+                        .map_or(state.grid_cell(), |layout| layout.cell_height)
+                        .max(1);
+                    let rows = ((viewport * 0.5) / cell as f32).max(1.0) as isize;
+                    let jump = rows * columns;
+                    state.move_browse_selection(if back { -jump } else { jump });
+                } else {
+                    let rows = ((state.result_viewport() * 0.5) / state.row_height() as f32)
+                        .max(1.0) as isize;
+                    state.move_selection(if back { -rows } else { rows });
+                }
+            }
+            Action::PageUp | Action::PageDown => {
+                let back = action == Action::PageUp;
+                if browsing {
+                    let viewport = (state.footer_top() - BROWSE_CONTENT_TOP) as f32;
+                    state.scroll_browse(if back {
+                        -viewport * 0.88
+                    } else {
+                        viewport * 0.88
+                    });
+                } else {
+                    let step = state.result_viewport() * 0.88;
+                    state.set_result_scroll_immediate(if back {
+                        state.result_scroll - step
+                    } else {
+                        state.result_scroll + step
+                    });
+                }
+            }
+        }
+    }
+    true
 }
 
 unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool) -> bool {
@@ -3225,6 +3454,12 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
             return true;
         }
         if matches!(key, VK_CONTROL | VK_SHIFT | VK_MENU | VK_LWIN | VK_RWIN) {
+            return true;
+        }
+        if let Some(action) = state.capturing_action {
+            unsafe {
+                apply_captured_binding(state, action, key);
+            }
             return true;
         }
         let modifiers = if state.capture_active {
@@ -3602,10 +3837,16 @@ fn mouse_point_dip(lparam: LPARAM, dpi: u32) -> (f32, f32) {
 }
 
 unsafe fn route_wheel(state: &mut AppState, horizontal: bool, wparam: WPARAM, lparam: LPARAM) {
-    if state.view != View::Search {
+    if !matches!(state.view, View::Search | View::Shortcuts) {
         return;
     }
     let notches = ((wparam.0 >> 16) as u16 as i16 as f32) / 120.0;
+    if state.view == View::Shortcuts {
+        unsafe {
+            state.set_shortcut_scroll_immediate(state.shortcut_scroll - notches * WHEEL_NOTCH_DIPS);
+        }
+        return;
+    }
     if !state.browsing() {
         // The result list is a plain row list with no category rail, so the
         // wheel always means the list, in either axis.
@@ -3735,20 +3976,21 @@ fn search_clear_rect(width: i32) -> D2D_RECT_F {
     )
 }
 
-/// The footer actions, left to right: copy, insert and keep open, insert.
-/// The plain action sits rightmost because it is the one that finishes.
+/// The footer actions, left to right: the Shift cap, copy, insert. Both
+/// buttons show whichever action the current Shift state would run, so the
+/// cap and the labels always agree.
 fn footer_button_rects(width: i32, footer_top: i32) -> (D2D_RECT_F, D2D_RECT_F, D2D_RECT_F) {
     let top = footer_top as f32 + 8.0;
     let bottom = footer_top as f32 + 34.0;
     let insert_right = width as f32 - 26.0;
-    let insert_left = insert_right - 64.0;
-    let keep_right = insert_left - 8.0;
-    let keep_left = keep_right - 100.0;
-    let copy_right = keep_left - 8.0;
-    let copy_left = copy_right - 50.0;
+    let insert_left = insert_right - 108.0;
+    let copy_right = insert_left - 8.0;
+    let copy_left = copy_right - 96.0;
+    let cap_right = copy_left - 8.0;
+    let cap_left = cap_right - 26.0;
     (
+        rect(cap_left, top, cap_right, bottom),
         rect(copy_left, top, copy_right, bottom),
-        rect(keep_left, top, keep_right, bottom),
         rect(insert_left, top, insert_right, bottom),
     )
 }
@@ -3756,7 +3998,17 @@ fn footer_button_rects(width: i32, footer_top: i32) -> (D2D_RECT_F, D2D_RECT_F, 
 /// Track and thumb for whichever list the search view is showing. `None`
 /// means the content fits, so nothing is drawn or hit-tested.
 fn list_scrollbar_rects(state: &AppState) -> Option<(D2D_RECT_F, D2D_RECT_F)> {
-    let (width, _) = state.dimensions();
+    if state.view == View::Shortcuts {
+        let viewport = state.shortcut_viewport();
+        return scrollbar_rects(
+            state,
+            SHORTCUT_LIST_TOP,
+            viewport,
+            state.total_shortcut_height().max(viewport),
+            state.shortcut_scroll,
+            state.maximum_shortcut_scroll(),
+        );
+    }
     let content_top = state.list_content_top();
     let viewport = (state.footer_top() - content_top).max(1) as f32;
     let (total, scroll, maximum) = if state.browsing() {
@@ -3775,6 +4027,21 @@ fn list_scrollbar_rects(state: &AppState) -> Option<(D2D_RECT_F, D2D_RECT_F)> {
     if total <= viewport {
         return None;
     }
+    scrollbar_rects(state, content_top, viewport, total, scroll, maximum)
+}
+
+fn scrollbar_rects(
+    state: &AppState,
+    content_top: i32,
+    viewport: f32,
+    total: f32,
+    scroll: f32,
+    maximum: f32,
+) -> Option<(D2D_RECT_F, D2D_RECT_F)> {
+    if total <= viewport {
+        return None;
+    }
+    let width = state.dimensions().0;
     let track = rect(
         width as f32 - 13.0,
         content_top as f32 + 4.0,
@@ -3932,6 +4199,26 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
     if contains(header_button_rect(width, 0), x, y) {
         return Some(HitTarget::Close);
     }
+    if state.view == View::Shortcuts {
+        if list_scrollbar_rects(state).is_some_and(|(track, _)| contains(track, x, y)) {
+            return Some(HitTarget::Scrollbar);
+        }
+        let (reset, _, back) = settings_footer_rects(width, state.footer_top());
+        if contains(reset, x, y) {
+            return Some(HitTarget::ShortcutsReset);
+        }
+        if contains(back, x, y) {
+            return Some(HitTarget::ShortcutsBack);
+        }
+        if y >= SHORTCUT_LIST_TOP as f32 && y < state.footer_top() as f32 {
+            let content_y = y - SHORTCUT_LIST_TOP as f32 + state.shortcut_scroll;
+            let index = (content_y / SHORTCUT_ROW_HEIGHT as f32) as usize;
+            if index < Action::ALL.len() {
+                return Some(HitTarget::ShortcutRow(index));
+            }
+        }
+        return contains(resize_grip_rect(state), x, y).then_some(HitTarget::ResizeGrip);
+    }
     if contains(header_button_rect(width, 1), x, y) {
         return Some(HitTarget::Settings);
     }
@@ -3967,12 +4254,12 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
         }
         return contains(resize_grip_rect(state), x, y).then_some(HitTarget::ResizeGrip);
     }
-    let (copy, insert_keep, insert) = footer_button_rects(width, state.footer_top());
+    let (cap, copy, insert) = footer_button_rects(width, state.footer_top());
+    if contains(cap, x, y) {
+        return Some(HitTarget::ShiftCap);
+    }
     if contains(copy, x, y) {
         return Some(HitTarget::Copy);
-    }
-    if contains(insert_keep, x, y) {
-        return Some(HitTarget::InsertKeep);
     }
     if contains(insert, x, y) {
         return Some(HitTarget::Insert);
@@ -4132,7 +4419,9 @@ unsafe fn update_dragged_scrollbar(state: &mut AppState, y: f32) {
     let thumb_top = (y - offset).clamp(track.top, track.bottom - thumb_height);
     let ratio = (thumb_top - track.top) / available;
     unsafe {
-        if state.browsing() {
+        if state.view == View::Shortcuts {
+            state.set_shortcut_scroll_immediate(ratio * state.maximum_shortcut_scroll());
+        } else if state.browsing() {
             state.set_browse_scroll_immediate(ratio * state.maximum_browse_scroll());
         } else {
             state.set_result_scroll_immediate(ratio * state.maximum_result_scroll());
@@ -4202,9 +4491,14 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
                 }
             }
         }
-        HitTarget::Copy => unsafe { copy_selection(state, true) },
-        HitTarget::InsertKeep => unsafe { commit_selection(state, false) },
-        HitTarget::Insert => unsafe { commit_selection(state, true) },
+        HitTarget::ShiftCap => {
+            state.shift_latched = !state.shift_latched;
+            unsafe {
+                let _ = InvalidateRect(Some(state.hwnd), None, false);
+            }
+        }
+        HitTarget::Copy => unsafe { copy_selection(state, !state.keep_open()) },
+        HitTarget::Insert => unsafe { commit_selection(state, !state.keep_open()) },
         HitTarget::TonePopup => {}
         HitTarget::ToneOption(index) => {
             if let Some(picker) = state.tone_picker.take() {
@@ -4242,6 +4536,15 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
                 update_dragged_slider(state, x);
             }
         }
+        HitTarget::ShortcutRow(index) => {
+            state.shortcut_selected = index.min(Action::ALL.len() - 1);
+            let action = Action::ALL[state.shortcut_selected];
+            unsafe {
+                begin_capture(state, action);
+            }
+        }
+        HitTarget::ShortcutsReset => unsafe { reset_shortcuts(state) },
+        HitTarget::ShortcutsBack => unsafe { leave_shortcuts(state) },
         HitTarget::ResizeGrip => {
             let mut cursor = POINT::default();
             let mut window = RECT::default();
@@ -4661,7 +4964,155 @@ unsafe fn draw_picker(state: &mut AppState) -> Result<()> {
     match state.view {
         View::Search => unsafe { draw_search_picker(state) },
         View::Settings => unsafe { draw_settings_picker(state) },
+        View::Shortcuts => unsafe { draw_shortcuts_picker(state) },
     }
+}
+
+/// Every action and the chord that runs it, one row each. The list scrolls
+/// because it is longer than the shortest allowed window.
+unsafe fn draw_shortcuts_picker(state: &mut AppState) -> Result<()> {
+    let resources = unsafe { ensure_render_target(state)? };
+    let target = resources.target.clone();
+    let brushes = resources.brushes.clone();
+    let (width, height) = state.dimensions();
+    let footer_top = state.footer_top() as f32;
+    unsafe {
+        target.BeginDraw();
+        target.Clear(Some(&color(0x101217)));
+        target.DrawRoundedRectangle(
+            &rounded_rect(0.5, 0.5, width as f32 - 0.5, height as f32 - 0.5, 11.0),
+            &brushes.surface_border,
+            1.0,
+            None,
+        );
+        draw_text(
+            &target,
+            "Keyboard shortcuts",
+            &state.formats.label,
+            rect(18.0, 7.0, 240.0, 34.0),
+            &brushes.primary,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+        draw_header_button(
+            &target,
+            state,
+            width,
+            0,
+            "×",
+            &brushes.selection,
+            &brushes.secondary,
+        );
+        target.PushAxisAlignedClip(
+            &rect(0.0, SHORTCUT_LIST_TOP as f32, width as f32, footer_top),
+            D2D1_ANTIALIAS_MODE_ALIASED,
+        );
+    }
+    for (index, action) in Action::ALL.iter().enumerate() {
+        let row = shortcut_row_rect(width, index);
+        let top = row.top - state.shortcut_scroll;
+        let bottom = row.bottom - state.shortcut_scroll;
+        if bottom <= SHORTCUT_LIST_TOP as f32 || top >= footer_top {
+            continue;
+        }
+        let focused = index == state.shortcut_selected;
+        let hovered =
+            matches!(state.hovered_target, Some(HitTarget::ShortcutRow(row)) if row == index);
+        let capturing = state.capturing_action == Some(*action);
+        unsafe {
+            if focused || hovered || capturing {
+                let bounds = rounded_rect(row.left, top, row.right, bottom, 8.0);
+                target.FillRoundedRectangle(&bounds, &brushes.selection);
+                if focused || capturing {
+                    target.DrawRoundedRectangle(&bounds, &brushes.selection_border, 1.0, None);
+                }
+            }
+            draw_text(
+                &target,
+                action.label(),
+                &state.formats.label,
+                rect(24.0, top, width as f32 * 0.55, bottom),
+                &brushes.primary,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            );
+            let binding = if capturing {
+                "Press a shortcut…".to_string()
+            } else {
+                state.config.keys.get(*action).to_string()
+            };
+            draw_text(
+                &target,
+                &binding,
+                &state.formats.metadata,
+                rect(width as f32 * 0.55, top, width as f32 - 26.0, bottom),
+                if capturing {
+                    &brushes.accent
+                } else {
+                    &brushes.secondary
+                },
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            );
+        }
+    }
+    unsafe {
+        target.PopAxisAlignedClip();
+        draw_list_scrollbar(state, &resources);
+        target.DrawLine(
+            Vector2 {
+                X: 16.0,
+                Y: footer_top,
+            },
+            Vector2 {
+                X: width as f32 - 16.0,
+                Y: footer_top,
+            },
+            &brushes.surface_border,
+            1.0,
+            None,
+        );
+        let (reset, _, back) = settings_footer_rects(width, state.footer_top());
+        if let Some(status) = &state.status {
+            draw_text(
+                &target,
+                status,
+                &state.formats.metadata,
+                rect(140.0, footer_top, width as f32 - 74.0, height as f32 - 2.0),
+                &brushes.danger,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            );
+        } else {
+            draw_text(
+                &target,
+                "Enter rebinds the focused action",
+                &state.formats.center,
+                rect(140.0, footer_top, width as f32 - 74.0, height as f32 - 2.0),
+                &brushes.secondary,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            );
+        }
+        draw_button(
+            &target,
+            reset,
+            "Reset",
+            matches!(state.hovered_target, Some(HitTarget::ShortcutsReset)),
+            &brushes.selection,
+            &brushes.selection_border,
+            &brushes.primary,
+            &state.formats.center,
+        );
+        draw_button(
+            &target,
+            back,
+            "Back",
+            matches!(state.hovered_target, Some(HitTarget::ShortcutsBack)),
+            &brushes.selection,
+            &brushes.selection_border,
+            &brushes.primary,
+            &state.formats.center,
+        );
+        draw_resize_grip(state, &target, &brushes);
+        target.EndDraw(None, None)?;
+    }
+    Ok(())
 }
 
 unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
@@ -4812,8 +5263,8 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
             1.0,
             None,
         );
-        let (copy, insert_keep, insert) = footer_button_rects(width, state.footer_top());
-        let information = rect(14.0, footer_top, copy.left - 10.0, height as f32 - 2.0);
+        let (cap, copy, insert) = footer_button_rects(width, state.footer_top());
+        let information = rect(14.0, footer_top, cap.left - 10.0, height as f32 - 2.0);
         if let Some(status) = &state.status {
             draw_text(
                 &target,
@@ -4826,10 +5277,12 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
         } else {
             draw_entry_information(state, &target, information, &brushes.secondary);
         }
+        draw_shift_cap(state, &target, cap, &brushes);
+        let keep = state.keep_open();
         draw_button(
             &target,
             copy,
-            "Copy",
+            if keep { "Copy + keep" } else { "Copy" },
             matches!(state.hovered_target, Some(HitTarget::Copy)),
             &brushes.surface,
             &brushes.selection_border,
@@ -4838,18 +5291,8 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
         );
         draw_button(
             &target,
-            insert_keep,
-            "Insert + keep",
-            matches!(state.hovered_target, Some(HitTarget::InsertKeep)),
-            &brushes.surface,
-            &brushes.selection_border,
-            &brushes.primary,
-            &state.formats.center,
-        );
-        draw_button(
-            &target,
             insert,
-            "Insert",
+            if keep { "Insert + keep" } else { "Insert" },
             matches!(state.hovered_target, Some(HitTarget::Insert)),
             &brushes.surface,
             &brushes.selection_border,
@@ -5177,6 +5620,54 @@ unsafe fn draw_browser(
     }
 }
 
+/// The Shift key cap beside the footer actions. It carries no words: it is
+/// lit exactly when the actions are in their keep-open form, so holding
+/// Shift visibly moves it and the labels together. Clicking it latches the
+/// same state for people who never find the key.
+unsafe fn draw_shift_cap(
+    state: &AppState,
+    target: &ID2D1RenderTarget,
+    bounds: D2D_RECT_F,
+    brushes: &Brushes,
+) {
+    let active = state.keep_open();
+    let hovered = matches!(state.hovered_target, Some(HitTarget::ShiftCap));
+    unsafe {
+        let cap = rounded_rect(
+            bounds.left,
+            bounds.top + 3.0,
+            bounds.right,
+            bounds.bottom - 3.0,
+            6.0,
+        );
+        if active {
+            target.FillRoundedRectangle(&cap, &brushes.selection);
+        }
+        target.DrawRoundedRectangle(
+            &cap,
+            if active || hovered {
+                &brushes.selection_border
+            } else {
+                &brushes.surface_border
+            },
+            1.0,
+            None,
+        );
+        draw_text(
+            target,
+            "⇧",
+            &state.formats.icon,
+            rect(bounds.left, bounds.top + 1.0, bounds.right, bounds.bottom),
+            if active {
+                &brushes.primary
+            } else {
+                &brushes.secondary
+            },
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+    }
+}
+
 /// Draw the scrollbar for whichever list is on screen. The grip carries both
 /// the hover colour and the eased width, so the two read as one response.
 unsafe fn draw_list_scrollbar(state: &AppState, resources: &RenderResources) {
@@ -5385,6 +5876,10 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
             },
         ),
         ("Skin tone", state.config.skin_tone.to_string()),
+        (
+            "Keyboard shortcuts",
+            format!("{} actions", Action::ALL.len()),
+        ),
         (
             "Open shortcut",
             if state.capturing_shortcut {
@@ -5902,18 +6397,26 @@ unsafe fn draw_hover_help(
             .map(|(_, right)| ("More categories · scroll", right, right.bottom + 2.0)),
         // The scrollbar has no tooltip: the grip grows under the pointer,
         // which says what it is without covering the content beside it.
-        Some(HitTarget::Copy) => Some((
-            "Copy to the clipboard and close · Ctrl+C",
+        Some(HitTarget::ShiftCap) => Some((
+            "Hold Shift, or click, to keep the picker open",
             footer_button_rects(width, state.footer_top()).0,
             state.footer_top() as f32 - 31.0,
         )),
-        Some(HitTarget::InsertKeep) => Some((
-            "Insert and keep the picker open · Shift+Enter",
+        Some(HitTarget::Copy) => Some((
+            if state.keep_open() {
+                "Copy and keep the picker open · Ctrl+Shift+C"
+            } else {
+                "Copy to the clipboard and close · Ctrl+C"
+            },
             footer_button_rects(width, state.footer_top()).1,
             state.footer_top() as f32 - 31.0,
         )),
         Some(HitTarget::Insert) => Some((
-            "Insert and close · Enter",
+            if state.keep_open() {
+                "Insert and keep the picker open · Shift+Enter"
+            } else {
+                "Insert and close · Enter"
+            },
             footer_button_rects(width, state.footer_top()).2,
             state.footer_top() as f32 - 31.0,
         )),
