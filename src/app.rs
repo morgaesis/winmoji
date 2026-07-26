@@ -459,6 +459,17 @@ fn slider_bounds(config: Config, index: usize) -> Option<(i32, i32, i32)> {
 
 /// How many rows the settings view has.
 const SETTINGS_ROWS: usize = 8;
+const SETTINGS_LIST_TOP: i32 = 42;
+const SETTINGS_ROW_HEIGHT: i32 = 38;
+/// Room kept below the last row for the hint line, which scrolls with the rows
+/// rather than floating above the footer.
+const SETTINGS_HINT_HEIGHT: f32 = 30.0;
+
+/// Rows that run an action instead of holding a value. Arrow keys and a click
+/// both mean "do it", since there is nothing to step through.
+fn setting_is_action(index: usize) -> bool {
+    index >= 6
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HitTarget {
@@ -880,6 +891,10 @@ struct AppState {
     tone_picker: Option<TonePicker>,
     category_icon_entries: [Option<usize>; BrowseCategory::ALL.len()],
     settings_selected: usize,
+    settings_scroll: f32,
+    /// Whether `status` reports a failure. Only the shortcut list draws its
+    /// status both ways; elsewhere a status is always a failure.
+    status_error: bool,
     /// Row of the shortcut list that has focus, and how far the list is
     /// scrolled, in DIPs.
     shortcut_selected: usize,
@@ -1095,6 +1110,8 @@ impl AppState {
                     .flatten()
             }),
             settings_selected: 0,
+            settings_scroll: 0.0,
+            status_error: true,
             shortcut_selected: 0,
             shortcut_scroll: 0.0,
             capturing_action: None,
@@ -1484,6 +1501,46 @@ impl AppState {
         self.usage = usage_counts(&self.recents);
     }
 
+    fn settings_viewport(&self) -> f32 {
+        (self.footer_top() - SETTINGS_LIST_TOP).max(1) as f32
+    }
+
+    fn total_settings_height(&self) -> f32 {
+        SETTINGS_ROWS as f32 * SETTINGS_ROW_HEIGHT as f32 + SETTINGS_HINT_HEIGHT
+    }
+
+    fn maximum_settings_scroll(&self) -> f32 {
+        (self.total_settings_height() - self.settings_viewport()).max(0.0)
+    }
+
+    fn clamp_settings_scroll(&mut self) {
+        self.settings_scroll = self
+            .settings_scroll
+            .clamp(0.0, self.maximum_settings_scroll());
+    }
+
+    unsafe fn set_settings_scroll_immediate(&mut self, position: f32) {
+        self.settings_scroll = position;
+        self.clamp_settings_scroll();
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
+    }
+
+    /// Keep the focused settings row inside the viewport after it moves, so
+    /// keyboard navigation never leaves focus on a row that is off screen.
+    fn ensure_selected_setting_visible(&mut self) {
+        let row = SETTINGS_ROW_HEIGHT as f32;
+        let top = self.settings_selected as f32 * row;
+        let viewport = self.settings_viewport();
+        if top < self.settings_scroll {
+            self.settings_scroll = top;
+        } else if top + row > self.settings_scroll + viewport {
+            self.settings_scroll = top + row - viewport;
+        }
+        self.clamp_settings_scroll();
+    }
+
     fn shortcut_viewport(&self) -> f32 {
         (self.footer_top() - SHORTCUT_LIST_TOP).max(1) as f32
     }
@@ -1773,6 +1830,8 @@ impl AppState {
                         .position(|(section, item, _)| (*section, *item) == self.browse_focus)
                 })
                 .unwrap_or(0)
+        } else if self.view == View::Shortcuts {
+            self.shortcut_selected
         } else {
             self.selected
         };
@@ -2374,6 +2433,10 @@ unsafe extern "system" fn window_proc(
                     }
                     if state.view == View::Settings {
                         state.settings_selected = state.selected.min(SETTINGS_ROWS - 1);
+                        state.ensure_selected_setting_visible();
+                    }
+                    if state.view == View::Shortcuts {
+                        state.shortcut_selected = state.selected.min(Action::ALL.len() - 1);
                     }
                     unsafe {
                         let _ = InvalidateRect(Some(state.hwnd), None, false);
@@ -2716,6 +2779,7 @@ unsafe fn leave_shortcuts(state: &mut AppState) {
     }
     state.settings_selected = 6;
     state.selected = 6;
+    state.ensure_selected_setting_visible();
     unsafe {
         state.sync_accessible_results();
         let _ = InvalidateRect(Some(state.hwnd), None, false);
@@ -2726,6 +2790,7 @@ unsafe fn begin_capture(state: &mut AppState, action: Action) {
     state.capturing_action = Some(action);
     set_capturing_shortcut(state, true);
     state.status = Some(format!("Press the new shortcut for {}", action.label()));
+    state.status_error = false;
     unsafe {
         let _ = InvalidateRect(Some(state.hwnd), None, false);
     }
@@ -2735,7 +2800,18 @@ unsafe fn reset_shortcuts(state: &mut AppState) {
     state.config.keys = Keybinds::default();
     state.capturing_action = None;
     set_capturing_shortcut(state, false);
-    state.status = Some("Shortcuts reset".to_string());
+    // Rebinding on this page writes straight through, so resetting has to as
+    // well: defaults that only live in memory would come back changed.
+    match save_config(state.config) {
+        Ok(()) => {
+            state.status = Some("Shortcuts reset".to_string());
+            state.status_error = false;
+        }
+        Err(error) => {
+            state.status = Some(format!("Could not save shortcuts: {error}"));
+            state.status_error = true;
+        }
+    }
     unsafe {
         state.sync_accessible_results();
         let _ = InvalidateRect(Some(state.hwnd), None, false);
@@ -2778,11 +2854,16 @@ unsafe fn apply_captured_binding(state: &mut AppState, action: Action, key: VIRT
             state.capturing_action = None;
             set_capturing_shortcut(state, false);
             state.status = None;
+            state.status_error = false;
             if let Err(error) = save_config(state.config) {
                 state.status = Some(format!("Could not save shortcuts: {error}"));
+                state.status_error = true;
             }
         }
-        Err(error) => state.status = Some(error),
+        Err(error) => {
+            state.status = Some(error);
+            state.status_error = true;
+        }
     }
     unsafe {
         state.sync_accessible_results();
@@ -2856,6 +2937,7 @@ unsafe fn enter_settings(state: &mut AppState) {
     state.status = None;
     state.settings_selected = 0;
     state.selected = 0;
+    state.settings_scroll = 0.0;
     set_capturing_shortcut(state, false);
     unsafe {
         state.sync_accessible_results();
@@ -2889,6 +2971,13 @@ unsafe fn adjust_font_scale(state: &mut AppState, steps: i32) {
 }
 
 unsafe fn adjust_setting(state: &mut AppState, delta: isize) {
+    if setting_is_action(state.settings_selected) {
+        // Nothing to step through, so either direction runs the row.
+        unsafe {
+            activate_setting(state);
+        }
+        return;
+    }
     match state.settings_selected {
         0 => {
             state.config.dimensions.width = state
@@ -3497,6 +3586,7 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
     if key == VK_UP || (control && key.0 == VK_K_VALUE) {
         state.settings_selected = state.settings_selected.saturating_sub(1);
         state.selected = state.settings_selected;
+        state.ensure_selected_setting_visible();
         unsafe {
             state.sync_accessible_results();
             let _ = InvalidateRect(Some(state.hwnd), None, false);
@@ -3506,6 +3596,22 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
     if key == VK_DOWN || (control && key.0 == VK_J_VALUE) || key == VK_TAB {
         state.settings_selected = (state.settings_selected + 1).min(SETTINGS_ROWS - 1);
         state.selected = state.settings_selected;
+        state.ensure_selected_setting_visible();
+        unsafe {
+            state.sync_accessible_results();
+            let _ = InvalidateRect(Some(state.hwnd), None, false);
+        }
+        return true;
+    }
+    if key == VK_PRIOR || key == VK_NEXT {
+        let rows = ((state.settings_viewport() / SETTINGS_ROW_HEIGHT as f32) as usize).max(1);
+        state.settings_selected = if key == VK_PRIOR {
+            state.settings_selected.saturating_sub(rows)
+        } else {
+            (state.settings_selected + rows).min(SETTINGS_ROWS - 1)
+        };
+        state.selected = state.settings_selected;
+        state.ensure_selected_setting_visible();
         unsafe {
             state.sync_accessible_results();
             let _ = InvalidateRect(Some(state.hwnd), None, false);
@@ -3812,6 +3918,8 @@ unsafe fn resize_window_in_place(state: &mut AppState) {
         state.sync_accessible_results();
         let _ = InvalidateRect(Some(state.hwnd), None, false);
     }
+    state.clamp_settings_scroll();
+    state.clamp_shortcut_scroll();
 }
 
 unsafe fn layout(state: &AppState) {
@@ -3837,14 +3945,20 @@ fn mouse_point_dip(lparam: LPARAM, dpi: u32) -> (f32, f32) {
 }
 
 unsafe fn route_wheel(state: &mut AppState, horizontal: bool, wparam: WPARAM, lparam: LPARAM) {
-    if !matches!(state.view, View::Search | View::Shortcuts) {
-        return;
-    }
     let notches = ((wparam.0 >> 16) as u16 as i16 as f32) / 120.0;
     if state.view == View::Shortcuts {
         unsafe {
             state.set_shortcut_scroll_immediate(state.shortcut_scroll - notches * WHEEL_NOTCH_DIPS);
         }
+        return;
+    }
+    if state.view == View::Settings {
+        unsafe {
+            state.set_settings_scroll_immediate(state.settings_scroll - notches * WHEEL_NOTCH_DIPS);
+        }
+        return;
+    }
+    if state.view != View::Search {
         return;
     }
     if !state.browsing() {
@@ -3995,7 +4109,7 @@ fn footer_button_rects(width: i32, footer_top: i32) -> (D2D_RECT_F, D2D_RECT_F, 
     )
 }
 
-/// Track and thumb for whichever list the search view is showing. `None`
+/// Track and thumb for whichever list the current view is showing. `None`
 /// means the content fits, so nothing is drawn or hit-tested.
 fn list_scrollbar_rects(state: &AppState) -> Option<(D2D_RECT_F, D2D_RECT_F)> {
     if state.view == View::Shortcuts {
@@ -4007,6 +4121,17 @@ fn list_scrollbar_rects(state: &AppState) -> Option<(D2D_RECT_F, D2D_RECT_F)> {
             state.total_shortcut_height().max(viewport),
             state.shortcut_scroll,
             state.maximum_shortcut_scroll(),
+        );
+    }
+    if state.view == View::Settings {
+        let viewport = state.settings_viewport();
+        return scrollbar_rects(
+            state,
+            SETTINGS_LIST_TOP,
+            viewport,
+            state.total_settings_height().max(viewport),
+            state.settings_scroll,
+            state.maximum_settings_scroll(),
         );
     }
     let content_top = state.list_content_top();
@@ -4077,13 +4202,13 @@ fn ease_in_out(progress: f32) -> f32 {
     }
 }
 
-fn settings_row_rect(width: i32, index: usize) -> D2D_RECT_F {
-    let top = 42.0 + index as f32 * 38.0;
+fn settings_row_rect(width: i32, index: usize, scroll: f32) -> D2D_RECT_F {
+    let top = SETTINGS_LIST_TOP as f32 + index as f32 * SETTINGS_ROW_HEIGHT as f32 - scroll;
     rect(12.0, top, width as f32 - 12.0, top + 34.0)
 }
 
-fn slider_rect(width: i32, index: usize) -> D2D_RECT_F {
-    let row = settings_row_rect(width, index);
+fn slider_rect(width: i32, index: usize, scroll: f32) -> D2D_RECT_F {
+    let row = settings_row_rect(width, index, scroll);
     rect(
         (width as f32 * 0.45).max(164.0),
         row.top,
@@ -4232,14 +4357,19 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
         return Some(HitTarget::SearchClear);
     }
     if state.view == View::Settings {
-        for index in 0..SETTINGS_ROWS {
-            if contains(settings_row_rect(width, index), x, y) {
-                if slider_bounds(state.config, index).is_some()
-                    && contains(slider_rect(width, index), x, y)
-                {
-                    return Some(HitTarget::SettingSlider(index));
+        if list_scrollbar_rects(state).is_some_and(|(track, _)| contains(track, x, y)) {
+            return Some(HitTarget::Scrollbar);
+        }
+        if y >= SETTINGS_LIST_TOP as f32 && y < state.footer_top() as f32 {
+            for index in 0..SETTINGS_ROWS {
+                if contains(settings_row_rect(width, index, state.settings_scroll), x, y) {
+                    if slider_bounds(state.config, index).is_some()
+                        && contains(slider_rect(width, index, state.settings_scroll), x, y)
+                    {
+                        return Some(HitTarget::SettingSlider(index));
+                    }
+                    return Some(HitTarget::SettingRow(index));
                 }
-                return Some(HitTarget::SettingRow(index));
             }
         }
         let (discard, reset, back) = settings_footer_rects(width, state.footer_top());
@@ -4375,6 +4505,8 @@ unsafe fn update_dragged_resize(state: &mut AppState) {
         layout(state);
     }
     state.clamp_browse_scroll();
+    state.clamp_settings_scroll();
+    state.clamp_shortcut_scroll();
     state.needs_render = true;
 }
 
@@ -4385,7 +4517,7 @@ unsafe fn update_dragged_slider(state: &mut AppState, x: f32) {
     let Some((_, minimum, maximum)) = slider_bounds(state.config, index) else {
         return;
     };
-    let track = slider_rect(state.dimensions().0, index);
+    let track = slider_rect(state.dimensions().0, index, state.settings_scroll);
     let ratio = ((x - track.left) / (track.right - track.left)).clamp(0.0, 1.0);
     let value = minimum + ((maximum - minimum) as f32 * ratio) as i32;
     match index {
@@ -4421,6 +4553,8 @@ unsafe fn update_dragged_scrollbar(state: &mut AppState, y: f32) {
     unsafe {
         if state.view == View::Shortcuts {
             state.set_shortcut_scroll_immediate(ratio * state.maximum_shortcut_scroll());
+        } else if state.view == View::Settings {
+            state.set_settings_scroll_immediate(ratio * state.maximum_settings_scroll());
         } else if state.browsing() {
             state.set_browse_scroll_immediate(ratio * state.maximum_browse_scroll());
         } else {
@@ -4515,9 +4649,10 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
         HitTarget::SettingRow(index) => {
             state.settings_selected = index;
             state.selected = index;
-            if index == 4 {
-                set_capturing_shortcut(state, true);
-                state.status = Some("Press the new shortcut.".to_string());
+            if setting_is_action(index) {
+                unsafe {
+                    activate_setting(state);
+                }
             } else if index >= 2 && x >= state.dimensions().0 as f32 * 0.42 {
                 let midpoint = state.dimensions().0 as f32 * 0.7;
                 unsafe {
@@ -5076,7 +5211,11 @@ unsafe fn draw_shortcuts_picker(state: &mut AppState) -> Result<()> {
                 status,
                 &state.formats.metadata,
                 rect(140.0, footer_top, width as f32 - 74.0, height as f32 - 2.0),
-                &brushes.danger,
+                if state.status_error {
+                    &brushes.danger
+                } else {
+                    &brushes.secondary
+                },
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
             );
         } else {
@@ -5861,6 +6000,10 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
             D2D1_DRAW_TEXT_OPTIONS_NONE,
         );
         draw_header_button(&target, state, width, 0, "×", &selection, &secondary);
+        target.PushAxisAlignedClip(
+            &rect(0.0, SETTINGS_LIST_TOP as f32, width as f32, footer_top),
+            D2D1_ANTIALIAS_MODE_ALIASED,
+        );
     }
 
     let settings = [
@@ -5890,7 +6033,10 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
         ),
     ];
     for (index, (label, value)) in settings.iter().enumerate() {
-        let bounds = settings_row_rect(width, index);
+        let bounds = settings_row_rect(width, index, state.settings_scroll);
+        if bounds.bottom <= SETTINGS_LIST_TOP as f32 || bounds.top >= footer_top {
+            continue;
+        }
         if index == state.settings_selected {
             unsafe {
                 target.FillRoundedRectangle(
@@ -5917,7 +6063,7 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
             if let Some((current, minimum, maximum)) = slider_bounds(state.config, index) {
                 draw_slider(
                     &target,
-                    slider_rect(width, index),
+                    slider_rect(width, index, state.settings_scroll),
                     current,
                     minimum,
                     maximum,
@@ -5945,7 +6091,7 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
         }
     }
 
-    let hint_top = settings_row_rect(width, SETTINGS_ROWS - 1).bottom + 8.0;
+    let hint_top = settings_row_rect(width, SETTINGS_ROWS - 1, state.settings_scroll).bottom + 8.0;
     unsafe {
         draw_text(
             &target,
@@ -5953,8 +6099,10 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
             &state.formats.center,
             rect(24.0, hint_top, width as f32 - 24.0, hint_top + 22.0),
             &secondary,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
         );
+        target.PopAxisAlignedClip();
+        draw_list_scrollbar(state, &resources);
         target.DrawLine(
             Vector2 {
                 X: 16.0,

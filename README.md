@@ -28,7 +28,8 @@ Run `winmoji.exe` to show the picker. The default global shortcut is `Ctrl+Shift
 - Grid rows are rendered on demand for the visible viewport, so large categories do not create work for offscreen emoji during scrolling.
 - Hover or focus a character to show its configured name, code point, and type in the footer.
 - Hover category icons and buttons for their labels and shortcuts, including the Enter and Shift+Enter insert hints.
-- Press Ctrl+, or click the settings button to configure the picker. The Keyboard shortcuts row lists every action and the chord that runs it; Enter or a click rebinds the focused one, and a chord another action already owns is refused rather than taken. The arrow keys always move the selection and the search field always takes typing, so neither is rebindable.
+- Press Ctrl+, or click the settings button to configure the picker. The panel scrolls with the wheel, the scrollbar, Page Up and Page Down, or by moving the selection past an edge, so every row stays reachable at any window height.
+- The Keyboard shortcuts row opens its page with Enter, an arrow key, or a click. It lists every action and the chord that runs it; Enter or a click rebinds the focused one, and a chord another action already owns is refused rather than taken. Reset restores the stock chords and writes them straight away, as rebinding does. The arrow keys always move the selection and the search field always takes typing, so neither is rebindable.
 - Press Escape, click outside the picker, or switch to another window to close without inserting.
 - PrintScreen and Win-key shortcuts pass through while the picker is open, so system screenshots keep working.
 
