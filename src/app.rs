@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
-    COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HGLOBAL, HINSTANCE, HMODULE,
-    HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM,
+    COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, GlobalFree, HANDLE, HGLOBAL,
+    HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
@@ -64,9 +64,10 @@ use windows::Win32::System::Com::{
     CoUninitialize,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
+    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
+    SetClipboardData,
 };
-use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
     RegCreateKeyExW, RegDeleteValueW, RegSetValueExW,
@@ -95,21 +96,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, FindWindowW,
     GUITHREADINFO, GWLP_USERDATA, GetClientRect, GetCursorPos, GetForegroundWindow,
     GetGUIThreadInfo, GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, HMENU, HTCLIENT, IDC_ARROW, IDC_SIZENWSE, IsChild,
-    IsWindow, IsWindowVisible, KBDLLHOOKSTRUCT, KillTimer, LB_ADDSTRING, LB_GETCURSEL,
-    LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT,
-    LBS_NOTIFY, LLKHF_INJECTED, LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT, MWMO_INPUTAVAILABLE,
-    MsgWaitForMultipleObjectsEx, OBJID_CLIENT, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostMessageW,
-    PostQuitMessage, QS_ALLINPUT, RegisterClassW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
-    ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_STYLE,
-    WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_SETCURSOR,
-    WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN, WNDCLASSW, WS_CHILD,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
+    GetWindowTextW, GetWindowThreadProcessId, HMENU, HTCLIENT, HWND_TOPMOST, IDC_ARROW,
+    IDC_SIZENWSE, IsChild, IsWindow, IsWindowVisible, KBDLLHOOKSTRUCT, KillTimer, LB_ADDSTRING,
+    LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, LBN_DBLCLK, LBN_SELCHANGE, LBS_HASSTRINGS,
+    LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LLKHF_INJECTED, LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT,
+    MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, OBJID_CLIENT, PM_NOREMOVE, PM_REMOVE,
+    PeekMessageW, PostMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassW, SW_HIDE, SW_SHOW,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_QUIT,
+    WM_RBUTTONDOWN, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_XBUTTONDOWN,
+    WNDCLASSW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(not(feature = "console"))]
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MESSAGEBOX_STYLE, MessageBoxW};
@@ -118,10 +119,10 @@ use windows_numerics::Vector2;
 
 use crate::catalog::{self, Match};
 use crate::config::{
-    Config, DetailMode, EmojiFont, Hotkey, MAX_PICKER_HEIGHT, MAX_PICKER_WIDTH, MIN_PICKER_HEIGHT,
-    MIN_PICKER_WIDTH, MOD_ALT_VALUE, MOD_CONTROL_VALUE, MOD_NOREPEAT_VALUE, MOD_SHIFT_VALUE,
-    MOD_WIN_VALUE, PickerDimensions, SkinTone, load_config, load_recents, remember_recent,
-    save_config,
+    Config, DetailMode, EmojiFont, FONT_SCALE_STEP, Hotkey, MAX_FONT_SCALE, MAX_PICKER_HEIGHT,
+    MAX_PICKER_WIDTH, MIN_FONT_SCALE, MIN_PICKER_HEIGHT, MIN_PICKER_WIDTH, MOD_ALT_VALUE,
+    MOD_CONTROL_VALUE, MOD_NOREPEAT_VALUE, MOD_SHIFT_VALUE, MOD_WIN_VALUE, PickerDimensions,
+    RecentGlyph, SkinTone, load_config, load_recents, remember_recent, save_config,
 };
 
 const CLASS_NAME: PCWSTR = w!("WinMojiPickerWindow");
@@ -143,11 +144,23 @@ const CATEGORY_EDGE_WIDTH: f32 = 24.0;
 const BROWSE_CONTENT_TOP: i32 = 118;
 const FOOTER_HEIGHT: i32 = 42;
 const RESULT_ROW_HEIGHT: i32 = 40;
+const SCROLLBAR_THUMB_WIDTH: f32 = 5.0;
+/// Extra width the thumb takes on while hovered or dragged, giving the
+/// pointer a larger target once it is already there.
+const SCROLLBAR_GRIP_GROWTH: f32 = 4.0;
+/// How long the grip takes to reach its full width, in seconds.
+const SCROLLBAR_GRIP_SECONDS: f32 = 0.12;
+/// How many matches a search keeps. The list scrolls, so this is a bound on
+/// ranking work rather than on what the window can show; past a few hundred
+/// rows the ranking is guesswork and scrolling to reach it is slower than
+/// refining the query.
+const SEARCH_MATCH_LIMIT: usize = 300;
 const GRID_CELL: i32 = 48;
 const SECTION_HEADING_HEIGHT: i32 = 26;
 const SECTION_GAP: i32 = 10;
 const RESULTS_ID: usize = 2;
 const VK_A_VALUE: u16 = 0x41;
+const VK_C_VALUE: u16 = 0x43;
 const VK_D_VALUE: u16 = 0x44;
 const VK_G_VALUE: u16 = 0x47;
 const VK_U_VALUE: u16 = 0x55;
@@ -157,6 +170,8 @@ const VK_J_VALUE: u16 = 0x4a;
 const VK_K_VALUE: u16 = 0x4b;
 const VK_L_VALUE: u16 = 0x4c;
 const VK_OEM_COMMA_VALUE: u16 = 0xbc;
+const VK_OEM_MINUS_VALUE: u16 = 0xbd;
+const VK_OEM_PLUS_VALUE: u16 = 0xbb;
 const FOCUS_TIMER_ID: usize = 0x0057_4d02;
 const FOCUS_FRAME_MS: u32 = 100;
 const GLYPH_TILE: f32 = 44.0;
@@ -285,11 +300,12 @@ enum BrowseCategory {
     Objects,
     Flags,
     Symbols,
+    Characters,
     Emoticons,
 }
 
 impl BrowseCategory {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::Recent,
         Self::Smileys,
         Self::People,
@@ -300,6 +316,7 @@ impl BrowseCategory {
         Self::Objects,
         Self::Flags,
         Self::Symbols,
+        Self::Characters,
         Self::Emoticons,
     ];
 
@@ -314,7 +331,8 @@ impl BrowseCategory {
             Self::Activities => "Activities",
             Self::Objects => "Objects",
             Self::Flags => "Flags",
-            Self::Symbols => "Symbols",
+            Self::Symbols => "Emoji symbols",
+            Self::Characters => "Characters",
             Self::Emoticons => "Emoticons",
         }
     }
@@ -331,6 +349,7 @@ impl BrowseCategory {
             Self::Objects => "Objects",
             Self::Flags => "Flags",
             Self::Symbols => "Symbols",
+            Self::Characters => "Characters",
             Self::Emoticons => "Emoticons",
         }
     }
@@ -348,10 +367,10 @@ impl BrowseCategory {
             Self::Activities => entry.emoji_group == Some(Group::Activities),
             Self::Objects => entry.emoji_group == Some(Group::Objects),
             Self::Flags => entry.emoji_group == Some(Group::Flags),
-            Self::Symbols => {
-                entry.emoji_group == Some(Group::Symbols)
-                    || (entry.emoji_group.is_none() && entry.kind != "Emoticon")
-            }
+            Self::Symbols => entry.emoji_group == Some(Group::Symbols),
+            // Everything the Unicode sweep contributed: arrows, math,
+            // currency, punctuation, Greek and the technical ranges.
+            Self::Characters => entry.emoji_group.is_none() && entry.kind != "Emoticon",
             Self::Emoticons => entry.kind == "Emoticon",
         }
     }
@@ -367,7 +386,8 @@ impl BrowseCategory {
             Self::Activities => "⚽",
             Self::Objects => "💡",
             Self::Flags => "⚑",
-            Self::Symbols => "Ω",
+            Self::Symbols => "🔣",
+            Self::Characters => "Ω",
             Self::Emoticons => "¯\\_(ツ)_/¯",
         }
     }
@@ -383,6 +403,7 @@ impl BrowseCategory {
                 | Self::Travel
                 | Self::Activities
                 | Self::Objects
+                | Self::Symbols
         )
     }
 }
@@ -426,11 +447,22 @@ enum ScrollAnimation {
     Ease,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Slider {
-    Width,
-    Height,
+/// Value, minimum and maximum for the settings rows that use a slider.
+fn slider_bounds(config: Config, index: usize) -> Option<(i32, i32, i32)> {
+    match index {
+        0 => Some((config.dimensions.width, MIN_PICKER_WIDTH, MAX_PICKER_WIDTH)),
+        1 => Some((
+            config.dimensions.height,
+            MIN_PICKER_HEIGHT,
+            MAX_PICKER_HEIGHT,
+        )),
+        2 => Some((config.font_scale, MIN_FONT_SCALE, MAX_FONT_SCALE)),
+        _ => None,
+    }
 }
+
+/// How many rows the settings view has.
+const SETTINGS_ROWS: usize = 7;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HitTarget {
@@ -443,14 +475,14 @@ enum HitTarget {
     CategoryScrollRight,
     SearchResult(usize),
     BrowseItem { section: usize, item: usize },
-    BrowseScrollbar,
+    Scrollbar,
+    Copy,
+    InsertKeep,
     Insert,
-    InsertClose,
     ToneOption(usize),
     TonePopup,
     SettingRow(usize),
-    WidthSlider,
-    HeightSlider,
+    SettingSlider(usize),
     SettingsDiscard,
     SettingsReset,
     SettingsBack,
@@ -478,43 +510,45 @@ struct TextFormats {
 }
 
 impl TextFormats {
-    unsafe fn new(factory: &IDWriteFactory, emoji_font: EmojiFont) -> Result<Self> {
+    /// `scale` multiplies every size, so the whole picker reads larger or
+    /// smaller together rather than the labels drifting away from the glyphs.
+    unsafe fn new(factory: &IDWriteFactory, emoji_font: EmojiFont, scale: f32) -> Result<Self> {
         let emoji_family = match emoji_font {
             EmojiFont::SegoeEmoji => w!("Segoe UI Emoji"),
             EmojiFont::SegoeSymbol => w!("Segoe UI Symbol"),
         };
-        let glyph = unsafe { create_text_format(factory, emoji_family, 26.0, false)? };
+        let create_text_format = |factory: &IDWriteFactory, family, size: f32, bold| unsafe {
+            create_text_format(factory, family, size * scale, bold)
+        };
+        let glyph = create_text_format(factory, emoji_family, 26.0, false)?;
         unsafe {
             glyph.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         }
-        let glyph_small = unsafe { create_text_format(factory, emoji_family, 17.0, false)? };
+        let glyph_small = create_text_format(factory, emoji_family, 17.0, false)?;
         unsafe {
             glyph_small.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         }
-        let symbol = unsafe { create_text_format(factory, w!("Segoe UI Symbol"), 23.0, false)? };
+        let symbol = create_text_format(factory, w!("Segoe UI Symbol"), 23.0, false)?;
         unsafe {
             symbol.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         }
-        let math = unsafe { create_text_format(factory, w!("Cambria Math"), 22.0, false)? };
+        let math = create_text_format(factory, w!("Cambria Math"), 22.0, false)?;
         unsafe {
             math.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         }
-        let icon = unsafe { create_text_format(factory, w!("Segoe UI Symbol"), 14.0, false)? };
+        let icon = create_text_format(factory, w!("Segoe UI Symbol"), 14.0, false)?;
         unsafe {
             icon.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         }
-        let center =
-            unsafe { create_text_format(factory, w!("Segoe UI Variable Text"), 12.0, false)? };
+        let center = create_text_format(factory, w!("Segoe UI Variable Text"), 12.0, false)?;
         unsafe {
             center.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         }
-        let center_title =
-            unsafe { create_text_format(factory, w!("Segoe UI Variable Text"), 16.0, true)? };
+        let center_title = create_text_format(factory, w!("Segoe UI Variable Text"), 16.0, true)?;
         unsafe {
             center_title.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         }
-        let brand =
-            unsafe { create_text_format(factory, w!("Segoe UI Variable Text"), 10.0, false)? };
+        let brand = create_text_format(factory, w!("Segoe UI Variable Text"), 10.0, false)?;
         unsafe {
             brand.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
         }
@@ -525,32 +559,33 @@ impl TextFormats {
             Ok(format)
         };
         Ok(Self {
-            label: unsafe {
-                create_text_format(factory, w!("Segoe UI Variable Text"), 12.0, true)?
-            },
+            label: create_text_format(factory, w!("Segoe UI Variable Text"), 12.0, true)?,
             brand,
-            title: unsafe {
-                create_text_format(factory, w!("Segoe UI Variable Text"), 14.0, true)?
-            },
-            metadata: unsafe {
-                create_text_format(factory, w!("Segoe UI Variable Text"), 11.0, false)?
-            },
-            search: unsafe {
-                create_text_format(factory, w!("Segoe UI Variable Text"), 14.0, false)?
-            },
+            title: create_text_format(factory, w!("Segoe UI Variable Text"), 14.0, true)?,
+            metadata: create_text_format(factory, w!("Segoe UI Variable Text"), 11.0, false)?,
+            search: create_text_format(factory, w!("Segoe UI Variable Text"), 14.0, false)?,
             glyph,
             glyph_small,
             symbol,
             math,
-            emoticon: centered(unsafe {
-                create_text_format(factory, w!("Segoe UI Variable Text"), 14.0, false)?
-            })?,
-            emoticon_small: centered(unsafe {
-                create_text_format(factory, w!("Segoe UI Variable Text"), 10.0, false)?
-            })?,
-            emoticon_icon: centered(unsafe {
-                create_text_format(factory, w!("Segoe UI Variable Text"), 8.0, false)?
-            })?,
+            emoticon: centered(create_text_format(
+                factory,
+                w!("Segoe UI Variable Text"),
+                14.0,
+                false,
+            )?)?,
+            emoticon_small: centered(create_text_format(
+                factory,
+                w!("Segoe UI Variable Text"),
+                10.0,
+                false,
+            )?)?,
+            emoticon_icon: centered(create_text_format(
+                factory,
+                w!("Segoe UI Variable Text"),
+                8.0,
+                false,
+            )?)?,
             icon,
             center,
             center_title,
@@ -813,7 +848,10 @@ struct AppState {
     search: SearchField,
     matches: Vec<Match>,
     selected: usize,
-    recents: Vec<String>,
+    recents: Vec<RecentGlyph>,
+    /// Pick counts keyed by glyph, mirroring `recents` so scoring does not
+    /// scan the list for every catalog entry on every keystroke.
+    usage: catalog::UsageCounts,
     config: Config,
     display_dimensions: PickerDimensions,
     view: View,
@@ -823,6 +861,14 @@ struct AppState {
     browse_scroll: f32,
     browse_scroll_target: f32,
     browse_animation: ScrollAnimation,
+    /// Scroll offset of the search result list, in DIPs. The list holds more
+    /// matches than the window can show, so anything ranked below the fold is
+    /// still reachable.
+    result_scroll: f32,
+    /// Linear progress of the scrollbar grip between its resting and gripped
+    /// widths. Eased where it is used, so the growth is symmetric in both
+    /// directions.
+    scrollbar_grip: f32,
     category_scroll: f32,
     active_category: usize,
     hovered_entry: Option<usize>,
@@ -831,7 +877,8 @@ struct AppState {
     category_icon_entries: [Option<usize>; BrowseCategory::ALL.len()],
     settings_selected: usize,
     settings_original: Config,
-    dragging_slider: Option<Slider>,
+    /// Index of the settings row whose slider is being dragged.
+    dragging_slider: Option<usize>,
     dragging_scrollbar: Option<f32>,
     /// Cursor offset from the window's bottom-right corner while the corner
     /// grip is being dragged, in physical pixels.
@@ -994,8 +1041,10 @@ impl AppState {
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
         let dwrite_factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
-        let formats = unsafe { TextFormats::new(&dwrite_factory, config.emoji_font)? };
+        let formats =
+            unsafe { TextFormats::new(&dwrite_factory, config.emoji_font, config.scale())? };
         let displayable_entries = unsafe { build_displayable_entry_index(&dwrite_factory)? };
+        let recents = load_recents();
         let mut state = Self {
             hwnd: HWND::default(),
             accessible_results: HWND::default(),
@@ -1004,7 +1053,8 @@ impl AppState {
             search: SearchField::default(),
             matches: Vec::new(),
             selected: 0,
-            recents: load_recents(),
+            usage: usage_counts(&recents),
+            recents,
             config,
             display_dimensions: config.dimensions,
             view: View::Search,
@@ -1013,6 +1063,8 @@ impl AppState {
             browse_focus: (0, 0),
             browse_scroll: 0.0,
             browse_scroll_target: 0.0,
+            result_scroll: 0.0,
+            scrollbar_grip: 0.0,
             browse_animation: ScrollAnimation::Idle,
             category_scroll: 0.0,
             active_category: 0,
@@ -1062,19 +1114,58 @@ impl AppState {
     }
 
     fn row_height(&self) -> i32 {
-        RESULT_ROW_HEIGHT
+        (RESULT_ROW_HEIGHT as f32 * self.config.scale()).round() as i32
+    }
+
+    fn grid_cell(&self) -> i32 {
+        (GRID_CELL as f32 * self.config.scale()).round() as i32
     }
 
     fn footer_top(&self) -> i32 {
         self.dimensions().1 - FOOTER_HEIGHT
     }
 
-    fn result_limit(&self) -> usize {
-        ((self.footer_top() - SEARCH_RESULTS_TOP - 4) / self.row_height()).max(1) as usize
+    /// Height of the result list viewport, in DIPs.
+    fn result_viewport(&self) -> f32 {
+        (self.footer_top() - SEARCH_RESULTS_TOP).max(1) as f32
+    }
+
+    fn total_result_height(&self) -> f32 {
+        self.matches.len() as f32 * self.row_height() as f32
+    }
+
+    fn maximum_result_scroll(&self) -> f32 {
+        (self.total_result_height() - self.result_viewport()).max(0.0)
+    }
+
+    fn clamp_result_scroll(&mut self) {
+        self.result_scroll = self.result_scroll.clamp(0.0, self.maximum_result_scroll());
+    }
+
+    /// Bring the selected row fully inside the viewport, scrolling the least
+    /// distance that does so.
+    fn ensure_selected_result_visible(&mut self) {
+        let row_height = self.row_height() as f32;
+        let top = self.selected as f32 * row_height;
+        let bottom = top + row_height;
+        if top < self.result_scroll {
+            self.result_scroll = top;
+        } else if bottom > self.result_scroll + self.result_viewport() {
+            self.result_scroll = bottom - self.result_viewport();
+        }
+        self.clamp_result_scroll();
+    }
+
+    unsafe fn set_result_scroll_immediate(&mut self, position: f32) {
+        self.result_scroll = position;
+        self.clamp_result_scroll();
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
     }
 
     fn grid_columns(&self) -> usize {
-        ((self.dimensions().0 - 24) / GRID_CELL).max(1) as usize
+        ((self.dimensions().0 - 24) / self.grid_cell()).max(1) as usize
     }
 
     fn query(&self) -> &str {
@@ -1093,8 +1184,9 @@ impl AppState {
         self.matches = if self.browsing() {
             Vec::new()
         } else {
-            catalog::search(&self.search.text, self.result_limit())
+            catalog::search(&self.search.text, SEARCH_MATCH_LIMIT, &self.usage)
         };
+        self.result_scroll = 0.0;
         self.selected = 0;
         self.hovered_entry = None;
         self.status = None;
@@ -1120,6 +1212,7 @@ impl AppState {
             .selected
             .saturating_add_signed(delta)
             .min(self.matches.len() - 1);
+        self.ensure_selected_result_visible();
         unsafe {
             windows::Win32::UI::WindowsAndMessaging::SendMessageW(
                 self.accessible_results,
@@ -1195,10 +1288,15 @@ impl AppState {
         let mut recent = self
             .recents
             .iter()
-            .filter_map(|glyph| entries.iter().position(|entry| entry.glyph == *glyph))
+            .take(RECENT_GRID_LIMIT)
+            .filter_map(|recent| entries.iter().position(|entry| entry.glyph == recent.glyph))
             .collect::<Vec<_>>();
         if recent.is_empty() {
-            recent.extend(catalog::search("", 24).into_iter().map(|found| found.index));
+            recent.extend(
+                catalog::search("", 24, &self.usage)
+                    .into_iter()
+                    .map(|found| found.index),
+            );
         }
         let mut sections = vec![BrowseSection {
             category: BrowseCategory::Recent,
@@ -1267,7 +1365,11 @@ impl AppState {
                             42,
                         )
                     } else {
-                        (self.grid_columns(), GRID_CELL as f32, GRID_CELL)
+                        (
+                            self.grid_columns(),
+                            self.grid_cell() as f32,
+                            self.grid_cell(),
+                        )
                     };
                 let rows = section.indices.len().div_ceil(columns);
                 let grid_top = top + SECTION_HEADING_HEIGHT;
@@ -1356,14 +1458,54 @@ impl AppState {
         }
     }
 
-    /// True while the browse scroll needs animation frames. The message loop
-    /// polls this after handling input and renders vsync-paced frames until
-    /// the scroll settles.
-    fn scroll_animation_active(&self) -> bool {
-        self.browse_animation != ScrollAnimation::Idle
-            && self.view == View::Search
-            && self.browsing()
-            && unsafe { IsWindowVisible(self.hwnd) }.as_bool()
+    /// Top of whichever list the search view is showing.
+    /// Record a pick. It feeds both the Recent grid order and the usage
+    /// weight search ranking applies.
+    fn record_use(&mut self, glyph: &str) {
+        if let Err(error) = remember_recent(&mut self.recents, glyph) {
+            eprintln!("winmoji: could not save recent item: {error}");
+        }
+        self.usage = usage_counts(&self.recents);
+    }
+
+    fn list_content_top(&self) -> i32 {
+        if self.browsing() {
+            BROWSE_CONTENT_TOP
+        } else {
+            SEARCH_RESULTS_TOP
+        }
+    }
+
+    fn scrollbar_grip_target(&self) -> f32 {
+        let gripped = self.dragging_scrollbar.is_some()
+            || matches!(self.hovered_target, Some(HitTarget::Scrollbar));
+        if gripped { 1.0 } else { 0.0 }
+    }
+
+    /// True while anything on screen needs animation frames: the browse
+    /// scroll easing to a destination, or the scrollbar grip easing between
+    /// widths. The message loop polls this after handling input and renders
+    /// vsync-paced frames until everything settles.
+    fn animation_active(&self) -> bool {
+        if self.view != View::Search || !unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+            return false;
+        }
+        (self.browse_animation != ScrollAnimation::Idle && self.browsing())
+            || self.scrollbar_grip != self.scrollbar_grip_target()
+    }
+
+    /// Advance the grip toward its target at a fixed rate, so the growth
+    /// takes the same time however far it has left to travel.
+    fn tick_scrollbar_grip(&mut self, dt: f32) {
+        let target = self.scrollbar_grip_target();
+        let step = dt / SCROLLBAR_GRIP_SECONDS;
+        if (target - self.scrollbar_grip).abs() <= step {
+            self.scrollbar_grip = target;
+        } else if target > self.scrollbar_grip {
+            self.scrollbar_grip += step;
+        } else {
+            self.scrollbar_grip -= step;
+        }
     }
 
     /// Cancel any scroll animation, leaving the content where it stands.
@@ -1502,7 +1644,13 @@ impl AppState {
     }
 
     unsafe fn rebuild_formats(&mut self) -> Result<()> {
-        self.formats = unsafe { TextFormats::new(&self.dwrite_factory, self.config.emoji_font)? };
+        self.formats = unsafe {
+            TextFormats::new(
+                &self.dwrite_factory,
+                self.config.emoji_font,
+                self.config.scale(),
+            )?
+        };
         self.render = None;
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
@@ -1808,10 +1956,11 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
                 {
                     let key = VIRTUAL_KEY(message.wParam.0 as u16);
                     let control = GetKeyState(VK_CONTROL.0 as i32) < 0;
+                    let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
                     let handled = if state.view == View::Settings {
                         handle_settings_key(state, key, control)
                     } else {
-                        handle_picker_key(state, key, control)
+                        handle_picker_key(state, key, control, shift)
                     };
                     if handled {
                         continue;
@@ -1821,7 +1970,7 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
                 DispatchMessageW(&message);
             }
             let state = &mut *state_pointer;
-            if state.scroll_animation_active() {
+            if state.animation_active() {
                 render_animation_frame(state);
             } else if state.needs_render {
                 render_frame(state);
@@ -2158,7 +2307,7 @@ unsafe extern "system" fn window_proc(
                 let item_count = match state.view {
                     View::Search if browsing => visible_browse.as_ref().map_or(0, Vec::len),
                     View::Search => state.matches.len(),
-                    View::Settings => 6,
+                    View::Settings => SETTINGS_ROWS,
                 };
                 if selected >= 0 && (selected as usize) < item_count {
                     if browsing {
@@ -2169,7 +2318,7 @@ unsafe extern "system" fn window_proc(
                         state.selected = selected as usize;
                     }
                     if state.view == View::Settings {
-                        state.settings_selected = state.selected.min(5);
+                        state.settings_selected = state.selected.min(SETTINGS_ROWS - 1);
                     }
                     unsafe {
                         let _ = InvalidateRect(Some(state.hwnd), None, false);
@@ -2326,6 +2475,40 @@ unsafe extern "system" fn window_proc(
     }
 }
 
+/// How many recent glyphs the Recent grid shows. The store keeps more than
+/// this so search ranking has a longer memory than the grid does.
+const RECENT_GRID_LIMIT: usize = 32;
+
+fn usage_counts(recents: &[RecentGlyph]) -> catalog::UsageCounts {
+    recents
+        .iter()
+        .map(|recent| (recent.glyph.clone(), recent.uses))
+        .collect()
+}
+
+/// Make the window visible without activating it and put it back at the front
+/// of the topmost band. WS_EX_TOPMOST only decides which band the window
+/// belongs to; its position inside that band is wherever it was last left, and
+/// a picker that never takes activation is never raised by activation either.
+/// Anything that displaces it once displaces it permanently, and ShowWindow
+/// alone then returns it to exactly that spot, behind the window the user is
+/// typing into: visible to the API, invisible on screen, and passing clicks
+/// through to the application underneath.
+unsafe fn raise_picker_window(hwnd: HWND) {
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
+        .ok();
+    }
+}
+
 unsafe fn show_picker(
     state_pointer: *mut AppState,
     requested_target: Option<HWND>,
@@ -2353,7 +2536,7 @@ unsafe fn show_picker(
         // Render before showing: the window otherwise appears as an empty
         // frame until the first WM_PAINT lands.
         render_frame(state);
-        let _ = ShowWindow(state.hwnd, SW_SHOWNOACTIVATE);
+        raise_picker_window(state.hwnd);
         arm_focus_watch(state);
         if let Err(error) = start_keyboard_capture(state) {
             state.status = Some(format!("Keyboard capture unavailable: {error}"));
@@ -2410,6 +2593,7 @@ unsafe fn hide_picker(state: &mut AppState) {
     // Cancel any scroll in flight so the loop never animates a hidden window.
     state.browse_scroll_target = state.browse_scroll;
     state.browse_animation = ScrollAnimation::Idle;
+    state.scrollbar_grip = 0.0;
     state.last_frame = None;
     unsafe {
         stop_keyboard_capture(state);
@@ -2458,6 +2642,31 @@ unsafe fn enter_settings(state: &mut AppState) {
     }
 }
 
+/// Change the text scale by `steps` and keep it. Every size the picker draws
+/// derives from this, so the formats are rebuilt and the window re-laid out.
+unsafe fn adjust_font_scale(state: &mut AppState, steps: i32) {
+    let scaled =
+        (state.config.font_scale + steps * FONT_SCALE_STEP).clamp(MIN_FONT_SCALE, MAX_FONT_SCALE);
+    if scaled == state.config.font_scale {
+        return;
+    }
+    state.config.font_scale = scaled;
+    unsafe {
+        if let Err(error) = state.rebuild_formats() {
+            state.status = Some(format!("Could not resize the text: {error}"));
+            return;
+        }
+        state.rebuild_browse_sections_preserving_view();
+        state.clamp_result_scroll();
+        state.ensure_selected_result_visible();
+        state.sync_accessible_results();
+        let _ = InvalidateRect(Some(state.hwnd), None, false);
+    }
+    if let Err(error) = save_config(state.config) {
+        eprintln!("winmoji: could not save the text size: {error}");
+    }
+}
+
 unsafe fn adjust_setting(state: &mut AppState, delta: isize) {
     match state.settings_selected {
         0 => {
@@ -2484,14 +2693,17 @@ unsafe fn adjust_setting(state: &mut AppState, delta: isize) {
                 resize_window_in_place(state);
             }
         }
-        2 => state.config.details = state.config.details.next(delta),
-        3 => {
+        2 => unsafe {
+            adjust_font_scale(state, delta as i32);
+        },
+        3 => state.config.details = state.config.details.next(delta),
+        4 => {
             state.config.emoji_font = state.config.emoji_font.next(delta);
             if let Err(error) = unsafe { state.rebuild_formats() } {
                 state.status = Some(format!("Could not change emoji font: {error}"));
             }
         }
-        4 => {
+        5 => {
             state.config.skin_tone = state.config.skin_tone.next(delta);
         }
         _ => {}
@@ -2507,14 +2719,24 @@ unsafe fn adjust_setting(state: &mut AppState, delta: isize) {
 /// wrap-around) or records a new shortcut; the change previews immediately.
 unsafe fn activate_setting(state: &mut AppState) {
     match state.settings_selected {
-        2 => {
+        2 => unsafe {
+            // Wrap back to the smallest once the largest is reached, the way
+            // the other cycling rows do.
+            let steps = if state.config.font_scale >= MAX_FONT_SCALE {
+                (MIN_FONT_SCALE - MAX_FONT_SCALE) / FONT_SCALE_STEP
+            } else {
+                1
+            };
+            adjust_font_scale(state, steps);
+        },
+        3 => {
             state.config.details = if state.config.details == DetailMode::Both {
                 DetailMode::None
             } else {
                 state.config.details.next(1)
             };
         }
-        3 => {
+        4 => {
             state.config.emoji_font = match state.config.emoji_font {
                 EmojiFont::SegoeEmoji => EmojiFont::SegoeSymbol,
                 EmojiFont::SegoeSymbol => EmojiFont::SegoeEmoji,
@@ -2523,10 +2745,10 @@ unsafe fn activate_setting(state: &mut AppState) {
                 state.status = Some(format!("Could not change emoji font: {error}"));
             }
         }
-        4 => {
+        5 => {
             state.config.skin_tone = state.config.skin_tone.cycled();
         }
-        5 => {
+        6 => {
             set_capturing_shortcut(state, true);
             state.status = Some("Press the new shortcut".to_string());
         }
@@ -2645,6 +2867,7 @@ unsafe fn handle_captured_key(
         return;
     }
     let control = captured_key_down(&state.keyboard_state, VK_CONTROL);
+    let shift = captured_key_down(&state.keyboard_state, VK_SHIFT);
     if state.view == View::Settings {
         unsafe {
             handle_settings_key(state, key, control);
@@ -2652,13 +2875,14 @@ unsafe fn handle_captured_key(
         return;
     }
     if key == VK_RETURN {
-        state.pending_commit = Some(control);
+        // Enter finishes; Shift keeps the picker open for another pick, the
+        // same way Ctrl+C and Ctrl+Shift+C differ.
+        state.pending_commit = Some(!shift);
         return;
     }
-    if unsafe { handle_picker_key(state, key, control) } {
+    if unsafe { handle_picker_key(state, key, control, shift) } {
         return;
     }
-    let shift = captured_key_down(&state.keyboard_state, VK_SHIFT);
     match key {
         VK_BACK => {
             state.search.backspace(control);
@@ -2842,10 +3066,32 @@ fn captured_hotkey_modifiers(keyboard_state: &[u8; 256]) -> u32 {
     modifiers
 }
 
-unsafe fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool) -> bool {
+unsafe fn handle_picker_key(
+    state: &mut AppState,
+    key: VIRTUAL_KEY,
+    control: bool,
+    shift: bool,
+) -> bool {
+    // Ctrl+C finishes the way Ctrl+Enter does; adding Shift keeps the picker
+    // open for another pick, mirroring plain Enter.
+    if control && key.0 == VK_C_VALUE {
+        unsafe {
+            copy_selection(state, !shift);
+        }
+        return true;
+    }
     if control && key.0 == VK_OEM_COMMA_VALUE {
         unsafe {
             enter_settings(state);
+        }
+        return true;
+    }
+    // Ctrl+= and Ctrl+- resize the text wherever the picker is, settings
+    // included. VK_ADD and VK_SUBTRACT cover the numeric keypad.
+    if control && matches!(key.0, VK_OEM_PLUS_VALUE | VK_OEM_MINUS_VALUE | 0x6b | 0x6d) {
+        let up = matches!(key.0, VK_OEM_PLUS_VALUE | 0x6b);
+        unsafe {
+            adjust_font_scale(state, if up { 1 } else { -1 });
         }
         return true;
     }
@@ -2907,7 +3153,7 @@ unsafe fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: boo
             let cell = state
                 .section_layouts()
                 .get(state.browse_focus.0)
-                .map_or(GRID_CELL, |layout| layout.cell_height)
+                .map_or(state.grid_cell(), |layout| layout.cell_height)
                 .max(1);
             let rows = ((viewport * 0.5) / cell as f32).max(1.0) as isize;
             let jump = rows * columns;
@@ -2937,11 +3183,31 @@ unsafe fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: boo
             }
             return true;
         }
+        let viewport = state.result_viewport();
+        if control && (key.0 == VK_U_VALUE || key.0 == VK_D_VALUE) {
+            let rows = ((viewport * 0.5) / state.row_height() as f32).max(1.0) as isize;
+            unsafe {
+                state.move_selection(if key.0 == VK_U_VALUE { -rows } else { rows });
+            }
+            return true;
+        }
+        if key == VK_PRIOR {
+            unsafe {
+                state.set_result_scroll_immediate(state.result_scroll - viewport * 0.88);
+            }
+            return true;
+        }
+        if key == VK_NEXT {
+            unsafe {
+                state.set_result_scroll_immediate(state.result_scroll + viewport * 0.88);
+            }
+            return true;
+        }
     }
 
     if key == VK_RETURN {
         unsafe {
-            commit_selection(state, control);
+            commit_selection(state, !shift);
         }
         return true;
     }
@@ -3003,7 +3269,7 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
         return true;
     }
     if key == VK_DOWN || (control && key.0 == VK_J_VALUE) || key == VK_TAB {
-        state.settings_selected = (state.settings_selected + 1).min(5);
+        state.settings_selected = (state.settings_selected + 1).min(SETTINGS_ROWS - 1);
         state.selected = state.settings_selected;
         unsafe {
             state.sync_accessible_results();
@@ -3017,7 +3283,7 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
         }
         return true;
     }
-    if key.0 == 0x20 && state.settings_selected == 5 {
+    if key.0 == 0x20 && state.settings_selected == SETTINGS_ROWS - 1 {
         set_capturing_shortcut(state, true);
         state.status = Some("Press the new shortcut".to_string());
         unsafe {
@@ -3059,6 +3325,74 @@ unsafe fn commit_selection(state: &mut AppState, close_after: bool) {
     }
 }
 
+/// Put the selection on the clipboard rather than typing it into the target
+/// window. This is the path that still works where injection cannot reach:
+/// an elevated application, or a control that ignores KEYEVENTF_UNICODE.
+unsafe fn copy_selection(state: &mut AppState, close_after: bool) {
+    let Some(index) = state.selected_entry_index() else {
+        return;
+    };
+    let base = catalog::entries()[index].glyph.clone();
+    let text = catalog::toned(&base, state.config.skin_tone)
+        .map(str::to_owned)
+        .unwrap_or_else(|| base.clone());
+    if let Err(error) = unsafe { set_clipboard_text(state.hwnd, &text) } {
+        eprintln!("winmoji: clipboard write failed: {error}");
+        state.status = Some("Could not write to the clipboard.".to_string());
+        unsafe {
+            let _ = InvalidateRect(Some(state.hwnd), None, false);
+        }
+        return;
+    }
+    state.record_use(&base);
+    if close_after {
+        unsafe {
+            hide_picker(state);
+        }
+        state.rebuild_browse_sections();
+        return;
+    }
+    state.status = Some(format!("Copied {text}"));
+    state.rebuild_browse_sections_preserving_view();
+    unsafe {
+        state.sync_accessible_results();
+        let _ = InvalidateRect(Some(state.hwnd), None, false);
+    }
+}
+
+/// Replace the clipboard contents with `text`. The clipboard takes ownership
+/// of the moveable global on a successful SetClipboardData, so the handle is
+/// only freed on the paths that never hand it over.
+unsafe fn set_clipboard_text(hwnd: HWND, text: &str) -> Result<()> {
+    const CF_UNICODETEXT: u32 = 13;
+    let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        OpenClipboard(Some(hwnd))?;
+        let result = (|| -> Result<()> {
+            EmptyClipboard()?;
+            let bytes = std::mem::size_of_val(utf16.as_slice());
+            let global = GlobalAlloc(GMEM_MOVEABLE, bytes)?;
+            let pointer = GlobalLock(global) as *mut u16;
+            if pointer.is_null() {
+                let _ = GlobalFree(Some(global));
+                return Err(Error::new(
+                    HRESULT(0x8007000Eu32 as i32),
+                    "could not lock the clipboard buffer",
+                ));
+            }
+            std::ptr::copy_nonoverlapping(utf16.as_ptr(), pointer, utf16.len());
+            let _ = GlobalUnlock(global);
+            if let Err(error) = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(global.0))) {
+                let _ = GlobalFree(Some(global));
+                return Err(error);
+            }
+            Ok(())
+        })();
+        let _ = CloseClipboard();
+        result
+    }
+}
+
 /// Insert `text` into the captured target; `recent_glyph` is the catalog
 /// entry recorded in recents (the base glyph, so the Recent grid always
 /// shows catalog entries and follows the configured tone).
@@ -3075,9 +3409,7 @@ unsafe fn commit_text(state: &mut AppState, text: String, recent_glyph: String, 
     }
     match unsafe { inject_unicode(target, target_focus, &text) } {
         Ok(()) => {
-            if let Err(error) = remember_recent(&mut state.recents, &recent_glyph) {
-                eprintln!("winmoji: could not save recent item: {error}");
-            }
+            state.record_use(&recent_glyph);
             if !close_after {
                 state.rebuild_browse_sections_preserving_view();
                 unsafe {
@@ -3111,7 +3443,7 @@ unsafe fn restore_picker(state: &mut AppState) {
             let _ = InvalidateRect(Some(state.hwnd), None, false);
             return;
         }
-        let _ = ShowWindow(state.hwnd, SW_SHOWNOACTIVATE);
+        raise_picker_window(state.hwnd);
         if GetForegroundWindow() == state.target && start_keyboard_capture(state).is_ok() {
             arm_focus_watch(state);
             state.sync_accessible_results();
@@ -3270,10 +3602,18 @@ fn mouse_point_dip(lparam: LPARAM, dpi: u32) -> (f32, f32) {
 }
 
 unsafe fn route_wheel(state: &mut AppState, horizontal: bool, wparam: WPARAM, lparam: LPARAM) {
-    if state.view != View::Search || !state.browsing() {
+    if state.view != View::Search {
         return;
     }
     let notches = ((wparam.0 >> 16) as u16 as i16 as f32) / 120.0;
+    if !state.browsing() {
+        // The result list is a plain row list with no category rail, so the
+        // wheel always means the list, in either axis.
+        unsafe {
+            state.set_result_scroll_immediate(state.result_scroll - notches * WHEEL_NOTCH_DIPS);
+        }
+        return;
+    }
     // Wheel messages carry the cursor position in screen coordinates.
     let mut point = POINT {
         x: lparam.0 as u16 as i16 as i32,
@@ -3395,45 +3735,79 @@ fn search_clear_rect(width: i32) -> D2D_RECT_F {
     )
 }
 
-fn footer_button_rects(width: i32, footer_top: i32) -> (D2D_RECT_F, D2D_RECT_F) {
+/// The footer actions, left to right: copy, insert and keep open, insert.
+/// The plain action sits rightmost because it is the one that finishes.
+fn footer_button_rects(width: i32, footer_top: i32) -> (D2D_RECT_F, D2D_RECT_F, D2D_RECT_F) {
     let top = footer_top as f32 + 8.0;
     let bottom = footer_top as f32 + 34.0;
-    let close_right = width as f32 - 26.0;
-    let close_left = close_right - 104.0;
-    let insert_right = close_left - 8.0;
-    let insert_left = insert_right - 60.0;
+    let insert_right = width as f32 - 26.0;
+    let insert_left = insert_right - 64.0;
+    let keep_right = insert_left - 8.0;
+    let keep_left = keep_right - 100.0;
+    let copy_right = keep_left - 8.0;
+    let copy_left = copy_right - 50.0;
     (
+        rect(copy_left, top, copy_right, bottom),
+        rect(keep_left, top, keep_right, bottom),
         rect(insert_left, top, insert_right, bottom),
-        rect(close_left, top, close_right, bottom),
     )
 }
 
-fn browse_scrollbar_rects(state: &AppState) -> Option<(D2D_RECT_F, D2D_RECT_F)> {
+/// Track and thumb for whichever list the search view is showing. `None`
+/// means the content fits, so nothing is drawn or hit-tested.
+fn list_scrollbar_rects(state: &AppState) -> Option<(D2D_RECT_F, D2D_RECT_F)> {
     let (width, _) = state.dimensions();
-    let viewport = (state.footer_top() - BROWSE_CONTENT_TOP).max(1) as f32;
-    let total = state.total_browse_height().max(viewport as i32) as f32;
+    let content_top = state.list_content_top();
+    let viewport = (state.footer_top() - content_top).max(1) as f32;
+    let (total, scroll, maximum) = if state.browsing() {
+        (
+            state.total_browse_height().max(viewport as i32) as f32,
+            state.browse_scroll,
+            state.maximum_browse_scroll(),
+        )
+    } else {
+        (
+            state.total_result_height().max(viewport),
+            state.result_scroll,
+            state.maximum_result_scroll(),
+        )
+    };
     if total <= viewport {
         return None;
     }
     let track = rect(
         width as f32 - 13.0,
-        BROWSE_CONTENT_TOP as f32 + 4.0,
+        content_top as f32 + 4.0,
         width as f32 - 2.0,
         state.footer_top() as f32 - 4.0,
     );
     let track_height = track.bottom - track.top;
     let thumb_height = (track_height * viewport / total).max(24.0);
-    let maximum = state.maximum_browse_scroll().max(1.0);
-    let thumb_top = track.top + (track_height - thumb_height) * state.browse_scroll / maximum;
+    let thumb_top = track.top + (track_height - thumb_height) * scroll / maximum.max(1.0);
+    // The grip widens toward the left so its right edge stays put; a handle
+    // that moved under the cursor as it grew would be harder to grab, not
+    // easier.
+    let grip = SCROLLBAR_THUMB_WIDTH + ease_in_out(state.scrollbar_grip) * SCROLLBAR_GRIP_GROWTH;
     Some((
         track,
         rect(
-            width as f32 - 8.0,
+            width as f32 - 3.0 - grip,
             thumb_top,
             width as f32 - 3.0,
             thumb_top + thumb_height,
         ),
     ))
+}
+
+/// Symmetric acceleration and deceleration, so the grip neither jumps at the
+/// start nor arrives abruptly.
+fn ease_in_out(progress: f32) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    if progress < 0.5 {
+        2.0 * progress * progress
+    } else {
+        1.0 - (-2.0 * progress + 2.0).powi(2) / 2.0
+    }
 }
 
 fn settings_row_rect(width: i32, index: usize) -> D2D_RECT_F {
@@ -3571,13 +3945,12 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
         return Some(HitTarget::SearchClear);
     }
     if state.view == View::Settings {
-        for index in 0..6 {
+        for index in 0..SETTINGS_ROWS {
             if contains(settings_row_rect(width, index), x, y) {
-                if index == 0 && contains(slider_rect(width, index), x, y) {
-                    return Some(HitTarget::WidthSlider);
-                }
-                if index == 1 && contains(slider_rect(width, index), x, y) {
-                    return Some(HitTarget::HeightSlider);
+                if slider_bounds(state.config, index).is_some()
+                    && contains(slider_rect(width, index), x, y)
+                {
+                    return Some(HitTarget::SettingSlider(index));
                 }
                 return Some(HitTarget::SettingRow(index));
             }
@@ -3594,12 +3967,15 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
         }
         return contains(resize_grip_rect(state), x, y).then_some(HitTarget::ResizeGrip);
     }
-    let (insert, insert_close) = footer_button_rects(width, state.footer_top());
+    let (copy, insert_keep, insert) = footer_button_rects(width, state.footer_top());
+    if contains(copy, x, y) {
+        return Some(HitTarget::Copy);
+    }
+    if contains(insert_keep, x, y) {
+        return Some(HitTarget::InsertKeep);
+    }
     if contains(insert, x, y) {
         return Some(HitTarget::Insert);
-    }
-    if contains(insert_close, x, y) {
-        return Some(HitTarget::InsertClose);
     }
     if contains(resize_grip_rect(state), x, y) {
         return Some(HitTarget::ResizeGrip);
@@ -3621,8 +3997,8 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
                 return Some(HitTarget::Category(index));
             }
         }
-        if browse_scrollbar_rects(state).is_some_and(|(track, _)| contains(track, x, y)) {
-            return Some(HitTarget::BrowseScrollbar);
+        if list_scrollbar_rects(state).is_some_and(|(track, _)| contains(track, x, y)) {
+            return Some(HitTarget::Scrollbar);
         }
         if y < BROWSE_CONTENT_TOP as f32 || y >= state.footer_top() as f32 {
             return None;
@@ -3646,7 +4022,8 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
         }
         None
     } else if y >= SEARCH_RESULTS_TOP as f32 && y < state.footer_top() as f32 {
-        let row = ((y as i32 - SEARCH_RESULTS_TOP) / RESULT_ROW_HEIGHT) as usize;
+        let content_y = y - SEARCH_RESULTS_TOP as f32 + state.result_scroll;
+        let row = (content_y / RESULT_ROW_HEIGHT as f32) as usize;
         (row < state.matches.len()).then_some(HitTarget::SearchResult(row))
     } else {
         None
@@ -3715,21 +4092,27 @@ unsafe fn update_dragged_resize(state: &mut AppState) {
 }
 
 unsafe fn update_dragged_slider(state: &mut AppState, x: f32) {
-    let Some(slider) = state.dragging_slider else {
+    let Some(index) = state.dragging_slider else {
         return;
     };
-    let index = if slider == Slider::Width { 0 } else { 1 };
+    let Some((_, minimum, maximum)) = slider_bounds(state.config, index) else {
+        return;
+    };
     let track = slider_rect(state.dimensions().0, index);
     let ratio = ((x - track.left) / (track.right - track.left)).clamp(0.0, 1.0);
-    match slider {
-        Slider::Width => {
-            state.config.dimensions.width =
-                MIN_PICKER_WIDTH + ((MAX_PICKER_WIDTH - MIN_PICKER_WIDTH) as f32 * ratio) as i32;
+    let value = minimum + ((maximum - minimum) as f32 * ratio) as i32;
+    match index {
+        0 => state.config.dimensions.width = value,
+        1 => state.config.dimensions.height = value,
+        2 => {
+            // The text size takes effect as it is dragged; width and height
+            // wait for the drag to end because they resize the window.
+            let steps = (value - state.config.font_scale) / FONT_SCALE_STEP;
+            unsafe {
+                adjust_font_scale(state, steps);
+            }
         }
-        Slider::Height => {
-            state.config.dimensions.height =
-                MIN_PICKER_HEIGHT + ((MAX_PICKER_HEIGHT - MIN_PICKER_HEIGHT) as f32 * ratio) as i32;
-        }
+        _ => return,
     }
     unsafe {
         state.sync_accessible_results();
@@ -3741,15 +4124,19 @@ unsafe fn update_dragged_scrollbar(state: &mut AppState, y: f32) {
     let Some(offset) = state.dragging_scrollbar else {
         return;
     };
-    let Some((track, thumb)) = browse_scrollbar_rects(state) else {
+    let Some((track, thumb)) = list_scrollbar_rects(state) else {
         return;
     };
     let thumb_height = thumb.bottom - thumb.top;
     let available = (track.bottom - track.top - thumb_height).max(1.0);
     let thumb_top = (y - offset).clamp(track.top, track.bottom - thumb_height);
-    let position = (thumb_top - track.top) / available * state.maximum_browse_scroll();
+    let ratio = (thumb_top - track.top) / available;
     unsafe {
-        state.set_browse_scroll_immediate(position);
+        if state.browsing() {
+            state.set_browse_scroll_immediate(ratio * state.maximum_browse_scroll());
+        } else {
+            state.set_result_scroll_immediate(ratio * state.maximum_result_scroll());
+        }
     }
 }
 
@@ -3802,8 +4189,8 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
                 commit_selection(state, false);
             }
         }
-        HitTarget::BrowseScrollbar => {
-            if let Some((_, thumb)) = browse_scrollbar_rects(state) {
+        HitTarget::Scrollbar => {
+            if let Some((_, thumb)) = list_scrollbar_rects(state) {
                 state.dragging_scrollbar = Some(if contains(thumb, x, y) {
                     y - thumb.top
                 } else {
@@ -3815,8 +4202,9 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
                 }
             }
         }
-        HitTarget::Insert => unsafe { commit_selection(state, false) },
-        HitTarget::InsertClose => unsafe { commit_selection(state, true) },
+        HitTarget::Copy => unsafe { copy_selection(state, true) },
+        HitTarget::InsertKeep => unsafe { commit_selection(state, false) },
+        HitTarget::Insert => unsafe { commit_selection(state, true) },
         HitTarget::TonePopup => {}
         HitTarget::ToneOption(index) => {
             if let Some(picker) = state.tone_picker.take() {
@@ -3847,12 +4235,8 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
                 let _ = InvalidateRect(Some(state.hwnd), None, false);
             }
         }
-        HitTarget::WidthSlider | HitTarget::HeightSlider => {
-            state.dragging_slider = Some(if target == HitTarget::WidthSlider {
-                Slider::Width
-            } else {
-                Slider::Height
-            });
+        HitTarget::SettingSlider(index) => {
+            state.dragging_slider = Some(index);
             unsafe {
                 let _ = SetCapture(state.hwnd);
                 update_dragged_slider(state, x);
@@ -4117,6 +4501,7 @@ unsafe fn render_animation_frame(state: &mut AppState) {
     state.last_frame = Some(now);
     unsafe {
         state.tick_browse_scroll(dt);
+        state.tick_scrollbar_grip(dt);
         render_frame(state);
     }
 }
@@ -4389,7 +4774,6 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
             draw_browser(
                 state,
                 &resources,
-                &brushes.surface,
                 &brushes.surface_border,
                 &brushes.selection,
                 &brushes.selection_border,
@@ -4428,8 +4812,8 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
             1.0,
             None,
         );
-        let (insert, insert_close) = footer_button_rects(width, state.footer_top());
-        let information = rect(14.0, footer_top, insert.left - 10.0, height as f32 - 2.0);
+        let (copy, insert_keep, insert) = footer_button_rects(width, state.footer_top());
+        let information = rect(14.0, footer_top, copy.left - 10.0, height as f32 - 2.0);
         if let Some(status) = &state.status {
             draw_text(
                 &target,
@@ -4444,9 +4828,9 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
         }
         draw_button(
             &target,
-            insert,
-            "Insert",
-            matches!(state.hovered_target, Some(HitTarget::Insert)),
+            copy,
+            "Copy",
+            matches!(state.hovered_target, Some(HitTarget::Copy)),
             &brushes.surface,
             &brushes.selection_border,
             &brushes.primary,
@@ -4454,9 +4838,19 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
         );
         draw_button(
             &target,
-            insert_close,
-            "Insert + close",
-            matches!(state.hovered_target, Some(HitTarget::InsertClose)),
+            insert_keep,
+            "Insert + keep",
+            matches!(state.hovered_target, Some(HitTarget::InsertKeep)),
+            &brushes.surface,
+            &brushes.selection_border,
+            &brushes.primary,
+            &state.formats.center,
+        );
+        draw_button(
+            &target,
+            insert,
+            "Insert",
+            matches!(state.hovered_target, Some(HitTarget::Insert)),
             &brushes.surface,
             &brushes.selection_border,
             &brushes.primary,
@@ -4584,7 +4978,6 @@ unsafe fn layout_caret_x(layout: &IDWriteTextLayout, position: u32) -> Result<f3
 unsafe fn draw_browser(
     state: &AppState,
     resources: &RenderResources,
-    surface: &ID2D1SolidColorBrush,
     border: &ID2D1SolidColorBrush,
     selection: &ID2D1SolidColorBrush,
     selection_border: &ID2D1SolidColorBrush,
@@ -4780,30 +5173,45 @@ unsafe fn draw_browser(
     }
     unsafe {
         target.PopAxisAlignedClip();
+        draw_list_scrollbar(state, resources);
     }
-    if let Some((track, thumb)) = browse_scrollbar_rects(state) {
-        unsafe {
-            target.FillRoundedRectangle(
-                &rounded_rect(
-                    width as f32 - 7.0,
-                    track.top,
-                    width as f32 - 4.0,
-                    track.bottom,
-                    1.5,
-                ),
-                surface,
-            );
-            target.FillRoundedRectangle(
-                &rounded_rect(thumb.left, thumb.top, thumb.right, thumb.bottom, 2.5),
-                if matches!(state.hovered_target, Some(HitTarget::BrowseScrollbar))
-                    || state.dragging_scrollbar.is_some()
-                {
-                    selection_border
-                } else {
-                    border
-                },
-            );
-        }
+}
+
+/// Draw the scrollbar for whichever list is on screen. The grip carries both
+/// the hover colour and the eased width, so the two read as one response.
+unsafe fn draw_list_scrollbar(state: &AppState, resources: &RenderResources) {
+    let Some((track, thumb)) = list_scrollbar_rects(state) else {
+        return;
+    };
+    let (width, _) = state.dimensions();
+    let brushes = &resources.brushes;
+    let gripped = matches!(state.hovered_target, Some(HitTarget::Scrollbar))
+        || state.dragging_scrollbar.is_some();
+    unsafe {
+        resources.target.FillRoundedRectangle(
+            &rounded_rect(
+                width as f32 - 7.0,
+                track.top,
+                width as f32 - 4.0,
+                track.bottom,
+                1.5,
+            ),
+            &brushes.surface,
+        );
+        resources.target.FillRoundedRectangle(
+            &rounded_rect(
+                thumb.left,
+                thumb.top,
+                thumb.right,
+                thumb.bottom,
+                (thumb.right - thumb.left) / 2.0,
+            ),
+            if gripped {
+                &brushes.selection_border
+            } else {
+                &brushes.surface_border
+            },
+        );
     }
 }
 
@@ -4820,9 +5228,20 @@ unsafe fn draw_search_results(
 ) {
     let target = &resources.target;
     let (width, _) = state.dimensions();
+    let viewport_top = SEARCH_RESULTS_TOP as f32;
+    let viewport_bottom = state.footer_top() as f32;
+    unsafe {
+        target.PushAxisAlignedClip(
+            &rect(0.0, viewport_top, width as f32, viewport_bottom),
+            D2D1_ANTIALIAS_MODE_ALIASED,
+        );
+    }
     for (row, found) in state.matches.iter().enumerate() {
-        let top = (SEARCH_RESULTS_TOP + row as i32 * RESULT_ROW_HEIGHT) as f32;
-        if top + RESULT_ROW_HEIGHT as f32 > state.footer_top() as f32 {
+        let top = viewport_top + row as f32 * RESULT_ROW_HEIGHT as f32 - state.result_scroll;
+        if top + RESULT_ROW_HEIGHT as f32 <= viewport_top {
+            continue;
+        }
+        if top >= viewport_bottom {
             break;
         }
         let entry = &catalog::entries()[found.index];
@@ -4885,6 +5304,10 @@ unsafe fn draw_search_results(
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
             );
         }
+    }
+    unsafe {
+        target.PopAxisAlignedClip();
+        draw_list_scrollbar(state, resources);
     }
     if state.matches.is_empty() {
         let query = state.query();
@@ -4952,6 +5375,7 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
     let settings = [
         ("Width", format!("{} px", state.config.dimensions.width)),
         ("Height", format!("{} px", state.config.dimensions.height)),
+        ("Text size", format!("{}%", state.config.font_scale)),
         ("Hover details", state.config.details.to_string()),
         (
             "Emoji font",
@@ -4995,25 +5419,13 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
                 &primary,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
             );
-            if index < 2 {
+            if let Some((current, minimum, maximum)) = slider_bounds(state.config, index) {
                 draw_slider(
                     &target,
                     slider_rect(width, index),
-                    if index == 0 {
-                        state.config.dimensions.width
-                    } else {
-                        state.config.dimensions.height
-                    },
-                    if index == 0 {
-                        MIN_PICKER_WIDTH
-                    } else {
-                        MIN_PICKER_HEIGHT
-                    },
-                    if index == 0 {
-                        MAX_PICKER_WIDTH
-                    } else {
-                        MAX_PICKER_HEIGHT
-                    },
+                    current,
+                    minimum,
+                    maximum,
                     value,
                     &selection_border,
                     &accent,
@@ -5024,6 +5436,7 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
                 draw_setting_value(
                     state,
                     &target,
+                    &brushes,
                     index,
                     value,
                     rect(
@@ -5032,15 +5445,12 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
                         width as f32 - 24.0,
                         bounds.bottom,
                     ),
-                    &primary,
-                    &secondary,
-                    &selection_border,
                 );
             }
         }
     }
 
-    let hint_top = settings_row_rect(width, 5).bottom + 8.0;
+    let hint_top = settings_row_rect(width, SETTINGS_ROWS - 1).bottom + 8.0;
     unsafe {
         draw_text(
             &target,
@@ -5196,13 +5606,14 @@ const PREVIEW_GLYPH: &str = "👋";
 unsafe fn draw_setting_value(
     state: &AppState,
     target: &ID2D1RenderTarget,
+    brushes: &Brushes,
     index: usize,
     value: &str,
     bounds: D2D_RECT_F,
-    primary: &ID2D1SolidColorBrush,
-    secondary: &ID2D1SolidColorBrush,
-    selection_border: &ID2D1SolidColorBrush,
 ) {
+    let primary = &brushes.primary;
+    let secondary = &brushes.secondary;
+    let selection_border = &brushes.selection_border;
     unsafe {
         draw_text(
             target,
@@ -5228,19 +5639,47 @@ unsafe fn draw_setting_value(
         bounds.bottom,
     );
     match index {
-        // Hover details: the line the footer will actually show.
-        2 => unsafe {
+        // Hover details: a hovered row drawn the way the picker draws one,
+        // carrying the footer line the mode produces.
+        3 => unsafe {
+            let row = rounded_rect(
+                inner.left,
+                inner.top + 1.0,
+                inner.right,
+                inner.bottom - 1.0,
+                7.0,
+            );
+            target.FillRoundedRectangle(&row, &brushes.selection);
+            target.DrawRoundedRectangle(&row, selection_border, 1.0, None);
+            let tile = rect(
+                inner.left + 5.0,
+                inner.top + 5.0,
+                inner.left + 31.0,
+                inner.bottom - 5.0,
+            );
+            target.FillRoundedRectangle(
+                &rounded_rect(tile.left, tile.top, tile.right, tile.bottom, 6.0),
+                &brushes.glyph_surface,
+            );
+            draw_text(
+                target,
+                PREVIEW_GLYPH,
+                &state.formats.glyph_small,
+                tile,
+                primary,
+                D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+            );
             draw_text(
                 target,
                 &preview_details_line(state),
                 &state.formats.metadata,
-                inner,
-                primary,
+                rect(tile.right + 7.0, inner.top, inner.right - 6.0, inner.bottom),
+                secondary,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
             );
         },
         // Emoji font: the same glyphs under the chosen face.
-        3 => unsafe {
+        4 => unsafe {
             let sample = rect(inner.left, inner.top, inner.left + 74.0, inner.bottom);
             draw_text(
                 target,
@@ -5264,7 +5703,7 @@ unsafe fn draw_setting_value(
             );
         },
         // Skin tone: every tone on one glyph, the active one ringed.
-        4 => {
+        5 => {
             let step = ((inner.right - inner.left) / SkinTone::ALL.len() as f32).min(26.0);
             let strip =
                 inner.left + ((inner.right - inner.left) - step * SkinTone::ALL.len() as f32) / 2.0;
@@ -5308,14 +5747,25 @@ unsafe fn draw_setting_value(
 }
 
 /// The footer line for the sample glyph under the current detail mode.
-fn preview_details_line(state: &AppState) -> String {
-    let name = "waving hand";
-    match state.config.details {
+/// The footer line for one entry under the chosen mode. The footer and the
+/// settings preview both build their text here so the preview cannot drift
+/// from what the picker actually shows.
+fn detail_line(mode: DetailMode, name: &str, glyph: &str, kind: &str) -> String {
+    match mode {
         DetailMode::None => name.to_string(),
-        DetailMode::Type => format!("{name}  Emoji"),
-        DetailMode::Codepoint => format!("{name}  {}", codepoints(PREVIEW_GLYPH)),
-        DetailMode::Both => format!("{name}  {}  Emoji", codepoints(PREVIEW_GLYPH)),
+        DetailMode::Type => format!("{name}  {kind}"),
+        DetailMode::Codepoint => format!("{name}  {}", codepoints(glyph)),
+        DetailMode::Both => format!("{name}  {}  {kind}", codepoints(glyph)),
     }
+}
+
+fn preview_details_line(state: &AppState) -> String {
+    let entry = catalog::entries()
+        .iter()
+        .find(|entry| entry.glyph == PREVIEW_GLYPH);
+    let name = entry.map_or("Waving Hand", |entry| entry.name.as_str());
+    let kind = entry.map_or("Emoji", |entry| entry.kind);
+    detail_line(state.config.details, name, PREVIEW_GLYPH, kind)
 }
 
 /// Three stacked diagonals in the bottom-right corner marking the drag
@@ -5450,17 +5900,21 @@ unsafe fn draw_hover_help(
             .map(|(left, _)| ("Earlier categories · scroll", left, left.bottom + 2.0)),
         Some(HitTarget::CategoryScrollRight) => category_edge_rects(width)
             .map(|(_, right)| ("More categories · scroll", right, right.bottom + 2.0)),
-        Some(HitTarget::BrowseScrollbar) => {
-            browse_scrollbar_rects(state).map(|(_, thumb)| ("Drag to scroll", thumb, thumb.top))
-        }
-        Some(HitTarget::Insert) => Some((
-            "Insert and keep the picker open · Enter",
+        // The scrollbar has no tooltip: the grip grows under the pointer,
+        // which says what it is without covering the content beside it.
+        Some(HitTarget::Copy) => Some((
+            "Copy to the clipboard and close · Ctrl+C",
             footer_button_rects(width, state.footer_top()).0,
             state.footer_top() as f32 - 31.0,
         )),
-        Some(HitTarget::InsertClose) => Some((
-            "Insert and close · Ctrl+Enter",
+        Some(HitTarget::InsertKeep) => Some((
+            "Insert and keep the picker open · Shift+Enter",
             footer_button_rects(width, state.footer_top()).1,
+            state.footer_top() as f32 - 31.0,
+        )),
+        Some(HitTarget::Insert) => Some((
+            "Insert and close · Enter",
+            footer_button_rects(width, state.footer_top()).2,
             state.footer_top() as f32 - 31.0,
         )),
         _ => None,
@@ -5664,17 +6118,7 @@ unsafe fn draw_entry_information(
         return;
     };
     let entry = &catalog::entries()[index];
-    let detail = match state.config.details {
-        DetailMode::None => entry.name.clone(),
-        DetailMode::Type => format!("{}  {}", entry.name, entry.kind),
-        DetailMode::Codepoint => format!("{}  {}", entry.name, codepoints(&entry.glyph)),
-        DetailMode::Both => format!(
-            "{}  {}  {}",
-            entry.name,
-            codepoints(&entry.glyph),
-            entry.kind
-        ),
-    };
+    let detail = detail_line(state.config.details, &entry.name, &entry.glyph, entry.kind);
     unsafe {
         draw_text(
             target,
@@ -6067,8 +6511,11 @@ fn self_test() -> Result<()> {
         ("euro", "€"),
         ("'smi", "😊"),
     ];
+    // Stock ranking, with no usage history in play: this checks the catalog,
+    // not whatever the machine running the test has picked before.
+    let usage = catalog::UsageCounts::new();
     for (query, expected) in checks {
-        let first = catalog::search(query, 1)
+        let first = catalog::search(query, 1, &usage)
             .first()
             .map(|item| catalog::entries()[item.index].glyph.as_str());
         if first.map(|glyph| glyph.trim_end_matches('\u{fe0f}')) != Some(expected) {
@@ -6294,11 +6741,12 @@ fn benchmark() -> String {
     let init_start = Instant::now();
     let catalog_size = catalog::entries().len();
     let catalog_init_ms = init_start.elapsed().as_secs_f64() * 1_000.0;
+    let usage = catalog::UsageCounts::new();
     let mut samples = Vec::with_capacity(queries.len() * 200);
     for _ in 0..200 {
         for query in queries {
             let start = Instant::now();
-            std::hint::black_box(catalog::search(query, 7));
+            std::hint::black_box(catalog::search(query, 7, &usage));
             samples.push(start.elapsed().as_nanos());
         }
     }
@@ -6423,19 +6871,25 @@ mod tests {
     }
 
     #[test]
-    fn browser_categories_follow_cldr_groups_and_merge_symbols() {
+    fn browser_categories_follow_cldr_groups_and_split_symbols() {
         let entries = catalog::entries();
-        let smile = entries
-            .iter()
-            .find(|entry| entry.glyph == "😀")
-            .expect("grinning face exists");
-        let summation = entries
-            .iter()
-            .find(|entry| entry.glyph == "∑")
-            .expect("summation symbol exists");
+        let find = |glyph: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.glyph == glyph)
+                .unwrap_or_else(|| panic!("{glyph} exists"))
+        };
+        let smile = find("😀");
+        let summation = find("∑");
+        let input_symbols = find("🔣");
         assert!(BrowseCategory::Smileys.contains(smile));
-        assert!(BrowseCategory::Symbols.contains(summation));
         assert!(!BrowseCategory::Symbols.contains(smile));
+        // The CLDR emoji symbols group and the Unicode text catalog are
+        // separate categories, and neither holds the other's entries.
+        assert!(BrowseCategory::Symbols.contains(input_symbols));
+        assert!(!BrowseCategory::Characters.contains(input_symbols));
+        assert!(BrowseCategory::Characters.contains(summation));
+        assert!(!BrowseCategory::Symbols.contains(summation));
     }
 
     #[test]
@@ -6448,7 +6902,7 @@ mod tests {
         assert!(BrowseCategory::Emoticons.contains(table_flip));
         assert!(!BrowseCategory::Symbols.contains(table_flip));
         assert!(
-            catalog::search("table flip", 7)
+            catalog::search("table flip", 7, &catalog::UsageCounts::new())
                 .iter()
                 .any(|found| { entries[found.index].glyph == "(╯°□°)╯︵ ┻━┻" })
         );

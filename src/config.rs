@@ -16,7 +16,17 @@ pub const MAX_PICKER_HEIGHT: i32 = 760;
 pub const DEFAULT_PICKER_WIDTH: i32 = 440;
 pub const DEFAULT_PICKER_HEIGHT: i32 = 380;
 
-const RECENT_LIMIT: usize = 32;
+/// Text size as a percentage of the stock sizes. Everything the picker draws
+/// scales together, so rows and grid cells grow with the text they hold.
+pub const MIN_FONT_SCALE: i32 = 80;
+pub const MAX_FONT_SCALE: i32 = 160;
+pub const DEFAULT_FONT_SCALE: i32 = 100;
+pub const FONT_SCALE_STEP: i32 = 5;
+
+/// How many glyphs keep a usage count. Longer than the grid: an emoji picked
+/// often should still outrank a more literal name match once it has fallen
+/// off the Recent grid.
+pub const USAGE_LIMIT: usize = 200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Hotkey {
@@ -317,13 +327,34 @@ impl fmt::Display for SkinTone {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Config {
     pub hotkey: Hotkey,
     pub dimensions: PickerDimensions,
+    pub font_scale: i32,
     pub details: DetailMode,
     pub emoji_font: EmojiFont,
     pub skin_tone: SkinTone,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            hotkey: Hotkey::default(),
+            dimensions: PickerDimensions::default(),
+            font_scale: DEFAULT_FONT_SCALE,
+            details: DetailMode::default(),
+            emoji_font: EmojiFont::default(),
+            skin_tone: SkinTone::default(),
+        }
+    }
+}
+
+impl Config {
+    /// The text scale as a multiplier, clamped to the supported range.
+    pub fn scale(self) -> f32 {
+        self.font_scale.clamp(MIN_FONT_SCALE, MAX_FONT_SCALE) as f32 / 100.0
+    }
 }
 
 pub fn config_path() -> io::Result<PathBuf> {
@@ -372,6 +403,12 @@ fn parse_config(content: &str) -> Result<Config, String> {
         let value = value.trim().trim_matches('"');
         match key.trim() {
             "hotkey" => config.hotkey = Hotkey::parse(value)?,
+            "font_scale" => {
+                config.font_scale = value
+                    .parse::<i32>()
+                    .map_err(|_| format!("invalid font scale: {value}"))?
+                    .clamp(MIN_FONT_SCALE, MAX_FONT_SCALE)
+            }
             "width" => {
                 config.dimensions.width = value
                     .parse()
@@ -418,10 +455,11 @@ pub fn save_config(config: Config) -> Result<(), String> {
         .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     let dimensions = config.dimensions.clamped();
     let content = format!(
-        "hotkey = \"{}\"\nwidth = {}\nheight = {}\ndetails = \"{}\"\nemoji_font = \"{}\"\nskin_tone = \"{}\"\n",
+        "hotkey = \"{}\"\nwidth = {}\nheight = {}\nfont_scale = {}\ndetails = \"{}\"\nemoji_font = \"{}\"\nskin_tone = \"{}\"\n",
         config.hotkey,
         dimensions.width,
         dimensions.height,
+        config.font_scale.clamp(MIN_FONT_SCALE, MAX_FONT_SCALE),
         config.details.to_string().to_ascii_lowercase(),
         config.emoji_font,
         config.skin_tone.to_string().to_ascii_lowercase(),
@@ -430,7 +468,16 @@ pub fn save_config(config: Config) -> Result<(), String> {
         .map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
-pub fn load_recents() -> Vec<String> {
+/// One glyph the user has picked, with how often. The list is ordered most
+/// recent first: the Recent grid reads the order, search ranking reads the
+/// counts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecentGlyph {
+    pub glyph: String,
+    pub uses: u32,
+}
+
+pub fn load_recents() -> Vec<RecentGlyph> {
     recent_path()
         .ok()
         .and_then(|path| fs::read_to_string(path).ok())
@@ -438,32 +485,62 @@ pub fn load_recents() -> Vec<String> {
             content
                 .lines()
                 .filter(|line| !line.is_empty())
-                .take(RECENT_LIMIT)
-                .map(str::to_owned)
+                .take(USAGE_LIMIT)
+                .map(parse_recent)
                 .collect()
         })
         .unwrap_or_default()
 }
 
-pub fn remember_recent(recents: &mut Vec<String>, glyph: &str) -> Result<(), String> {
+/// `uses`, a tab, then the glyph. A line with no tab was written before
+/// counts existed and stands for a single use.
+fn parse_recent(line: &str) -> RecentGlyph {
+    match line.split_once('\t') {
+        Some((uses, glyph)) => RecentGlyph {
+            glyph: glyph.to_string(),
+            uses: uses.parse().unwrap_or(1).max(1),
+        },
+        None => RecentGlyph {
+            glyph: line.to_string(),
+            uses: 1,
+        },
+    }
+}
+
+pub fn remember_recent(recents: &mut Vec<RecentGlyph>, glyph: &str) -> Result<(), String> {
     touch_recent(recents, glyph);
     let path = recent_path().map_err(|error| error.to_string())?;
     write_recents(&path, recents)
 }
 
-fn touch_recent(recents: &mut Vec<String>, glyph: &str) {
-    recents.retain(|existing| existing != glyph);
-    recents.insert(0, glyph.to_string());
-    recents.truncate(RECENT_LIMIT);
+fn touch_recent(recents: &mut Vec<RecentGlyph>, glyph: &str) {
+    let uses = recents
+        .iter()
+        .find(|existing| existing.glyph == glyph)
+        .map_or(0, |existing| existing.uses)
+        .saturating_add(1);
+    recents.retain(|existing| existing.glyph != glyph);
+    recents.insert(
+        0,
+        RecentGlyph {
+            glyph: glyph.to_string(),
+            uses,
+        },
+    );
+    recents.truncate(USAGE_LIMIT);
 }
 
-fn write_recents(path: &Path, recents: &[String]) -> Result<(), String> {
+fn write_recents(path: &Path, recents: &[RecentGlyph]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("invalid recent-items path: {}", path.display()))?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-    let mut content = recents.join("\n");
+    let mut content = recents
+        .iter()
+        .map(|recent| format!("{}\t{}", recent.uses, recent.glyph))
+        .collect::<Vec<_>>()
+        .join("\n");
     if !content.is_empty() {
         content.push('\n');
     }
@@ -558,13 +635,29 @@ mod tests {
         assert_eq!(EmojiFont::SegoeSymbol.next(1), EmojiFont::SegoeSymbol);
     }
 
+    fn recent(glyph: &str, uses: u32) -> RecentGlyph {
+        RecentGlyph {
+            glyph: glyph.to_string(),
+            uses,
+        }
+    }
+
     #[test]
     fn recent_items_are_unique_and_newest_first() {
-        let mut recents = vec!["😀".to_string(), "λ".to_string()];
+        let mut recents = vec![recent("😀", 3), recent("λ", 1)];
         touch_recent(&mut recents, "λ");
-        assert_eq!(recents, ["λ", "😀"]);
+        assert_eq!(recents, [recent("λ", 2), recent("😀", 3)]);
         touch_recent(&mut recents, "→");
-        assert_eq!(recents, ["→", "λ", "😀"]);
+        assert_eq!(recents, [recent("→", 1), recent("λ", 2), recent("😀", 3)]);
+    }
+
+    /// A store written before counts existed still loads, with every glyph
+    /// standing for a single use.
+    #[test]
+    fn recent_items_parse_with_and_without_counts() {
+        assert_eq!(parse_recent("7\t😀"), recent("😀", 7));
+        assert_eq!(parse_recent("😀"), recent("😀", 1));
+        assert_eq!(parse_recent("0\t😀"), recent("😀", 1));
     }
 
     #[test]

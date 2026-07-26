@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -84,7 +84,26 @@ pub fn supports_tones(glyph: &str) -> bool {
         .is_some_and(|mut tones| tones.nth(1).is_some())
 }
 
-pub fn search(query: &str, limit: usize) -> Vec<Match> {
+/// How often the user has picked each glyph, keyed by the catalog glyph.
+pub type UsageCounts = HashMap<String, u32>;
+
+/// What a glyph the user has picked before is worth. Only entries that
+/// already match the query compete, so this reorders answers rather than
+/// introducing them, and it is deliberately large enough to cross a match
+/// tier: something picked for this kind of query before is a better answer
+/// than something whose name merely reads more literally.
+const USAGE_BONUS_BASE: i32 = 500;
+const USAGE_BONUS_STEP: i32 = 40;
+const USAGE_BONUS_USES: u32 = 11;
+
+fn usage_bonus(usage: &UsageCounts, glyph: &str) -> i32 {
+    match usage.get(glyph).copied().unwrap_or(0) {
+        0 => 0,
+        uses => USAGE_BONUS_BASE + USAGE_BONUS_STEP * (uses.min(USAGE_BONUS_USES) - 1) as i32,
+    }
+}
+
+pub fn search(query: &str, limit: usize, usage: &UsageCounts) -> Vec<Match> {
     if limit == 0 {
         return Vec::new();
     }
@@ -124,6 +143,7 @@ pub fn search(query: &str, limit: usize) -> Vec<Match> {
             .enumerate()
             .filter_map(|(index, entry)| {
                 score_entry(entry, &query_tokens, &query, allow_fuzzy)
+                    .map(|score| score + usage_bonus(usage, &entry.glyph))
                     .map(|score| Match { index, score })
             })
             .collect::<Vec<_>>()
@@ -444,7 +464,7 @@ fn curated_keywords(glyph: &str) -> &'static str {
         "😀" => "smile happy joy",
         "😂" => "laugh cry funny lol",
         "🙂" => "smile happy",
-        "❤️" | "❤" => "love affection",
+        "❤️" | "❤" => "heart love affection",
         "🔥" => "hot flame lit",
         "✅" | "✓" => "done success yes tick",
         "❌" | "✗" => "error fail no close",
@@ -540,7 +560,7 @@ mod tests {
     use super::*;
 
     fn top(query: &str) -> String {
-        let result = search(query, 8)
+        let result = search(query, 8, &UsageCounts::new())
             .first()
             .copied()
             .unwrap_or_else(|| panic!("expected a result for {query}"));
@@ -594,6 +614,46 @@ mod tests {
         assert_eq!(top("grin"), "😀");
     }
 
+    /// The plain emoji for a word outranks both the compound names that
+    /// contain it (Smiling Face With Heart-Eyes) and the emoticon whose name
+    /// happens to be exactly that word.
+    #[test]
+    fn ranks_the_plain_emoji_ahead_of_names_that_merely_contain_it() {
+        assert_eq!(top("heart"), "❤️");
+    }
+
+    /// Picking an entry teaches the ranking. "frown" leads with the symbol
+    /// literally named Frown until the user picks the frowning face, after
+    /// which their choice leads and the symbol falls behind it.
+    #[test]
+    fn picking_an_entry_lifts_it_above_a_more_literal_name() {
+        assert_eq!(top("frown"), "⌢");
+
+        let mut usage = UsageCounts::new();
+        usage.insert("☹️".to_string(), 1);
+        let ranked = search("frown", 8, &usage);
+        let glyph = |position: usize| entries()[ranked[position].index].glyph.as_str();
+        assert_eq!(glyph(0), "☹️");
+        assert!(
+            ranked
+                .iter()
+                .any(|found| entries()[found.index].glyph == "⌢"),
+            "the literal name is deranked, not dropped"
+        );
+    }
+
+    #[test]
+    fn usage_weight_saturates_rather_than_growing_without_bound() {
+        let bonus = |uses| {
+            let mut usage = UsageCounts::new();
+            usage.insert("🚀".to_string(), uses);
+            usage_bonus(&usage, "🚀")
+        };
+        assert_eq!(bonus(0), 0);
+        assert!(bonus(1) < bonus(2));
+        assert_eq!(bonus(USAGE_BONUS_USES), bonus(USAGE_BONUS_USES + 90));
+    }
+
     #[test]
     fn tolerates_common_typing_errors() {
         assert_eq!(top("smiel"), "😀");
@@ -605,7 +665,7 @@ mod tests {
 
     #[test]
     fn ignores_search_punctuation() {
-        let results = search("'smi", 8);
+        let results = search("'smi", 8, &UsageCounts::new());
         assert!(!results.is_empty());
         assert!(
             results
@@ -633,8 +693,8 @@ mod tests {
 
     #[test]
     fn caps_result_count() {
-        assert_eq!(search("arrow", 8).len(), 8);
-        assert!(search("arrow", 0).is_empty());
+        assert_eq!(search("arrow", 8, &UsageCounts::new()).len(), 8);
+        assert!(search("arrow", 0, &UsageCounts::new()).is_empty());
     }
 
     #[test]
