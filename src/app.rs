@@ -1573,7 +1573,7 @@ impl AppState {
     /// widths. The message loop polls this after handling input and renders
     /// vsync-paced frames until everything settles.
     fn animation_active(&self) -> bool {
-        if self.view != View::Search || !unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+        if self.view != View::Search || !is_window_visible(self.hwnd) {
             return false;
         }
         (self.browse_animation != ScrollAnimation::Idle && self.browsing())
@@ -2037,8 +2037,8 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
                     && (message.hwnd == state.accessible_results || message.hwnd == state.hwnd)
                 {
                     let key = VIRTUAL_KEY(message.wParam.0 as u16);
-                    let control = GetKeyState(VK_CONTROL.0 as i32) < 0;
-                    let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
+                    let control = key_is_down(VK_CONTROL);
+                    let shift = key_is_down(VK_SHIFT);
                     let handled = match state.view {
                         View::Settings => handle_settings_key(state, key, control),
                         View::Shortcuts => handle_shortcuts_key(state, key, control),
@@ -2066,7 +2066,7 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
                 // urgent; duty-cycle it so the resident process does not
                 // monopolise a core.
                 let wait = match warm_glyph_slice(state) {
-                    WarmOutcome::Worked if IsWindowVisible(state.hwnd).as_bool() => 0,
+                    WarmOutcome::Worked if is_window_visible(state.hwnd) => 0,
                     WarmOutcome::Worked => WARM_IDLE_PAUSE_MS,
                     WarmOutcome::Done => INFINITE,
                 };
@@ -2235,15 +2235,74 @@ fn foreground_window() -> HWND {
     unsafe { GetForegroundWindow() }
 }
 
-fn cursor_over_window(hwnd: HWND) -> bool {
+/// Whether `key` is held down right now.
+///
+/// Reads the calling thread's view of the keyboard, which is a copy rather
+/// than a borrow of system state, so the result cannot dangle.
+fn key_is_down(key: VIRTUAL_KEY) -> bool {
+    unsafe { GetKeyState(key.0 as i32) < 0 }
+}
+
+/// Whether `hwnd` still names a live window.
+///
+/// The answer is advisory the moment it is returned, since another thread may
+/// destroy the window; every caller already treats it that way.
+fn is_window(hwnd: HWND) -> bool {
+    unsafe { IsWindow(Some(hwnd)).as_bool() }
+}
+
+/// Whether `hwnd` currently has the visible style.
+fn is_window_visible(hwnd: HWND) -> bool {
+    unsafe { IsWindowVisible(hwnd).as_bool() }
+}
+
+/// The DPI `hwnd` renders at, never below the 96 baseline.
+///
+/// `GetDpiForWindow` reports 0 for a handle it does not recognise, which would
+/// scale the whole layout to nothing; the floor is part of the contract here.
+fn window_dpi(hwnd: HWND) -> u32 {
+    unsafe { GetDpiForWindow(hwnd) }.max(96)
+}
+
+/// The thread that owns `hwnd`, or 0 if the handle is not recognised.
+fn window_thread(hwnd: HWND) -> u32 {
+    unsafe { GetWindowThreadProcessId(hwnd, None) }
+}
+
+/// The screen rectangle of `hwnd`.
+///
+/// The out-parameter is filled before the call returns, so the rectangle is
+/// an owned copy and the caller keeps no handle on system memory. The same
+/// holds for [`client_rect`] and [`cursor_position`].
+fn window_rect(hwnd: HWND) -> Result<RECT> {
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut rect) }?;
+    Ok(rect)
+}
+
+/// The client rectangle of `hwnd`.
+fn client_rect(hwnd: HWND) -> Result<RECT> {
+    let mut rect = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut rect) }?;
+    Ok(rect)
+}
+
+/// The pointer position in screen coordinates.
+fn cursor_position() -> Result<POINT> {
     let mut point = POINT::default();
-    let mut window = RECT::default();
-    unsafe { GetCursorPos(&mut point) }.is_ok()
-        && unsafe { GetWindowRect(hwnd, &mut window) }.is_ok()
-        && point.x >= window.left
-        && point.x < window.right
-        && point.y >= window.top
-        && point.y < window.bottom
+    unsafe { GetCursorPos(&mut point) }?;
+    Ok(point)
+}
+
+fn contains_point(rect: RECT, point: POINT) -> bool {
+    point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+}
+
+fn cursor_over_window(hwnd: HWND) -> bool {
+    match (cursor_position(), window_rect(hwnd)) {
+        (Ok(point), Ok(window)) => contains_point(window, point),
+        _ => false,
+    }
 }
 
 unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -2258,12 +2317,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
         ) {
             let event = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
             let hwnd = HWND(HOOK_STATE.hwnd.load(Ordering::Acquire) as *mut c_void);
-            let mut window = RECT::default();
-            let inside = unsafe { GetWindowRect(hwnd, &mut window) }.is_ok()
-                && event.pt.x >= window.left
-                && event.pt.x < window.right
-                && event.pt.y >= window.top
-                && event.pt.y < window.bottom;
+            let inside = window_rect(hwnd).is_ok_and(|window| contains_point(window, event.pt));
             if !inside {
                 unsafe {
                     let _ = PostMessageW(Some(hwnd), WM_CAPTURE_TARGET_LOST, WPARAM(0), LPARAM(0));
@@ -2600,7 +2654,7 @@ unsafe fn show_picker(
 ) {
     let state = unsafe { &mut *state_pointer };
     let foreground = requested_target
-        .filter(|target| !target.is_invalid() && unsafe { IsWindow(Some(*target)).as_bool() })
+        .filter(|target| !target.is_invalid() && is_window(*target))
         .unwrap_or_else(foreground_window);
     if foreground != state.hwnd && !foreground.is_invalid() {
         state.target = foreground;
@@ -2632,7 +2686,7 @@ unsafe fn show_picker(
 /// Point the device at the window's current DPI and resize the swap chain to
 /// match the client area.
 fn apply_device_dpi(state: &mut AppState) {
-    let dpi = unsafe { GetDpiForWindow(state.hwnd) }.max(96);
+    let dpi = window_dpi(state.hwnd);
     state.dpi = dpi;
     resize_swapchain(state);
 }
@@ -3154,7 +3208,7 @@ fn handle_captured_key(state: &mut AppState, key: VIRTUAL_KEY, scan_code: u32, k
     if win || ((control || alt) && !alt_graph) {
         return;
     }
-    let target_thread = unsafe { GetWindowThreadProcessId(state.target, None) };
+    let target_thread = window_thread(state.target);
     let keyboard_layout = unsafe { GetKeyboardLayout(target_thread) };
     let mut translated = [0u16; 8];
     let count = unsafe {
@@ -3495,17 +3549,16 @@ fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool) ->
 
 fn current_hotkey_modifiers() -> u32 {
     let mut modifiers = MOD_NOREPEAT_VALUE;
-    if unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0 {
+    if key_is_down(VK_CONTROL) {
         modifiers |= MOD_CONTROL_VALUE;
     }
-    if unsafe { GetKeyState(VK_MENU.0 as i32) } < 0 {
+    if key_is_down(VK_MENU) {
         modifiers |= MOD_ALT_VALUE;
     }
-    if unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0 {
+    if key_is_down(VK_SHIFT) {
         modifiers |= MOD_SHIFT_VALUE;
     }
-    if unsafe { GetKeyState(VK_LWIN.0 as i32) } < 0 || unsafe { GetKeyState(VK_RWIN.0 as i32) } < 0
-    {
+    if key_is_down(VK_LWIN) || key_is_down(VK_RWIN) {
         modifiers |= MOD_WIN_VALUE;
     }
     modifiers
@@ -3638,10 +3691,7 @@ fn restore_picker(state: &mut AppState) {
 }
 
 fn position_near_cursor(state: &mut AppState) {
-    let mut cursor = POINT::default();
-    unsafe {
-        GetCursorPos(&mut cursor).ok();
-    }
+    let cursor = cursor_position().unwrap_or_default();
     let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
     let mut monitor_info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
@@ -3664,7 +3714,7 @@ fn position_near_cursor(state: &mut AppState) {
         )
         .ok();
     }
-    let dpi_x = unsafe { GetDpiForWindow(state.hwnd) }.max(96);
+    let dpi_x = window_dpi(state.hwnd);
     let dpi_y = dpi_x;
     state.dpi = dpi_x;
     let width = scale(base_width, dpi_x);
@@ -3715,10 +3765,9 @@ fn constrain_dimensions_to_work_area(state: &mut AppState, work_area: &RECT) {
 }
 
 fn resize_window_in_place(state: &mut AppState) {
-    let mut window = RECT::default();
-    if unsafe { GetWindowRect(state.hwnd, &mut window) }.is_err() {
+    let Ok(window) = window_rect(state.hwnd) else {
         return;
-    }
+    };
     let monitor = unsafe {
         MonitorFromPoint(
             POINT {
@@ -4300,13 +4349,9 @@ fn update_dragged_resize(state: &mut AppState) {
     let Some((offset_x, offset_y)) = state.dragging_resize else {
         return;
     };
-    let mut cursor = POINT::default();
-    let mut window = RECT::default();
-    if unsafe { GetCursorPos(&mut cursor) }.is_err()
-        || unsafe { GetWindowRect(state.hwnd, &mut window) }.is_err()
-    {
+    let (Ok(cursor), Ok(window)) = (cursor_position(), window_rect(state.hwnd)) else {
         return;
-    }
+    };
     let width = ((cursor.x + offset_x - window.left) * 96 / state.dpi as i32)
         .clamp(MIN_PICKER_WIDTH, MAX_PICKER_WIDTH);
     let height = ((cursor.y + offset_y - window.top) * 96 / state.dpi as i32)
@@ -4477,11 +4522,7 @@ fn handle_click(state: &mut AppState, x: f32, y: f32) {
         HitTarget::ShortcutsReset => reset_shortcuts(state),
         HitTarget::ShortcutsBack => leave_shortcuts(state),
         HitTarget::ResizeGrip => {
-            let mut cursor = POINT::default();
-            let mut window = RECT::default();
-            if unsafe { GetCursorPos(&mut cursor) }.is_ok()
-                && unsafe { GetWindowRect(state.hwnd, &mut window) }.is_ok()
-            {
+            if let (Ok(cursor), Ok(window)) = (cursor_position(), window_rect(state.hwnd)) {
                 state.dragging_resize = Some((window.right - cursor.x, window.bottom - cursor.y));
                 unsafe {
                     let _ = SetCapture(state.hwnd);
@@ -4533,10 +4574,7 @@ fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> {
     if let Some(resources) = &state.render {
         return Ok(resources.clone());
     }
-    let mut client = RECT::default();
-    unsafe {
-        GetClientRect(state.hwnd, &mut client)?;
-    }
+    let client = client_rect(state.hwnd)?;
 
     let mut device: Option<ID3D11Device> = None;
     let hardware = unsafe {
@@ -4665,10 +4703,9 @@ fn resize_swapchain(state: &mut AppState) {
     let Some(resources) = state.render.clone() else {
         return;
     };
-    let mut client = RECT::default();
-    if unsafe { GetClientRect(state.hwnd, &mut client) }.is_err() {
+    let Ok(client) = client_rect(state.hwnd) else {
         return;
-    }
+    };
     unsafe {
         resources.context.SetTarget(None);
         if resources
@@ -4785,21 +4822,17 @@ fn rasterize_batch(state: &AppState, resources: &RenderResources, batch: &[usize
                 catalog::toned(&entry.glyph, state.config.skin_tone).unwrap_or(&entry.glyph);
             let source = atlas_slot_rect(page.used);
             page.used += 1;
-            unsafe {
-                // Clip so a glyph that overflows its advance cannot bleed
-                // into the neighbouring tiles.
-                page.target
-                    .PushAxisAlignedClip(&source, D2D1_ANTIALIAS_MODE_ALIASED);
-                draw_text(
-                    &page.target,
-                    glyph,
-                    &state.formats.glyph,
-                    source,
-                    &resources.brushes.primary,
-                    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
-                );
-                page.target.PopAxisAlignedClip();
-            }
+            // Clip so a glyph that overflows its advance cannot bleed
+            // into the neighbouring tiles.
+            page.target.push_clip(&source);
+            page.target.draw_text(
+                glyph,
+                &state.formats.glyph,
+                source,
+                &resources.brushes.primary,
+                D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+            );
+            page.target.pop_clip();
             resources.glyphs.borrow_mut().insert(
                 glyph_key(state, entry_index),
                 Some(GlyphSlot {
@@ -4853,7 +4886,7 @@ fn warm_glyph_slice(state: &mut AppState) -> WarmOutcome {
     if state.config.emoji_font != EmojiFont::SegoeEmoji {
         return WarmOutcome::Done;
     }
-    let visible = unsafe { IsWindowVisible(state.hwnd) }.as_bool();
+    let visible = is_window_visible(state.hwnd);
     let Ok(resources) = ensure_render_target(state) else {
         return WarmOutcome::Done;
     };
@@ -4900,14 +4933,12 @@ fn draw_shortcuts_picker(state: &mut AppState) -> Result<()> {
     unsafe {
         target.BeginDraw();
         target.Clear(Some(&color(0x101217)));
-        target.DrawRoundedRectangle(
+        target.stroke_rounded(
             &rounded_rect(0.5, 0.5, width as f32 - 0.5, height as f32 - 0.5, 11.0),
             &brushes.surface_border,
             1.0,
-            None,
         );
-        draw_text(
-            &target,
+        target.draw_text(
             "Keyboard shortcuts",
             &state.formats.label,
             rect(18.0, 7.0, 240.0, 34.0),
@@ -4923,10 +4954,12 @@ fn draw_shortcuts_picker(state: &mut AppState) -> Result<()> {
             &brushes.selection,
             &brushes.secondary,
         );
-        target.PushAxisAlignedClip(
-            &rect(0.0, SHORTCUT_LIST_TOP as f32, width as f32, footer_top),
-            D2D1_ANTIALIAS_MODE_ALIASED,
-        );
+        target.push_clip(&rect(
+            0.0,
+            SHORTCUT_LIST_TOP as f32,
+            width as f32,
+            footer_top,
+        ));
     }
     for (index, action) in Action::ALL.iter().enumerate() {
         let row = shortcut_row_rect(width, index);
@@ -4939,45 +4972,41 @@ fn draw_shortcuts_picker(state: &mut AppState) -> Result<()> {
         let hovered =
             matches!(state.hovered_target, Some(HitTarget::ShortcutRow(row)) if row == index);
         let capturing = state.capturing_action == Some(*action);
-        unsafe {
-            if focused || hovered || capturing {
-                let bounds = rounded_rect(row.left, top, row.right, bottom, 8.0);
-                target.FillRoundedRectangle(&bounds, &brushes.selection);
-                if focused || capturing {
-                    target.DrawRoundedRectangle(&bounds, &brushes.selection_border, 1.0, None);
-                }
+        if focused || hovered || capturing {
+            let bounds = rounded_rect(row.left, top, row.right, bottom, 8.0);
+            target.fill_rounded(&bounds, &brushes.selection);
+            if focused || capturing {
+                target.stroke_rounded(&bounds, &brushes.selection_border, 1.0);
             }
-            draw_text(
-                &target,
-                action.label(),
-                &state.formats.label,
-                rect(24.0, top, width as f32 * 0.55, bottom),
-                &brushes.primary,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-            );
-            let binding = if capturing {
-                "Press a shortcut…".to_string()
-            } else {
-                state.config.keys.get(*action).to_string()
-            };
-            draw_text(
-                &target,
-                &binding,
-                &state.formats.metadata,
-                rect(width as f32 * 0.55, top, width as f32 - 26.0, bottom),
-                if capturing {
-                    &brushes.accent
-                } else {
-                    &brushes.secondary
-                },
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-            );
         }
+        target.draw_text(
+            action.label(),
+            &state.formats.label,
+            rect(24.0, top, width as f32 * 0.55, bottom),
+            &brushes.primary,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+        );
+        let binding = if capturing {
+            "Press a shortcut…".to_string()
+        } else {
+            state.config.keys.get(*action).to_string()
+        };
+        target.draw_text(
+            &binding,
+            &state.formats.metadata,
+            rect(width as f32 * 0.55, top, width as f32 - 26.0, bottom),
+            if capturing {
+                &brushes.accent
+            } else {
+                &brushes.secondary
+            },
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+        );
     }
     unsafe {
-        target.PopAxisAlignedClip();
+        target.pop_clip();
         draw_list_scrollbar(state, &resources);
-        target.DrawLine(
+        target.draw_line(
             Vector2 {
                 X: 16.0,
                 Y: footer_top,
@@ -4988,12 +5017,10 @@ fn draw_shortcuts_picker(state: &mut AppState) -> Result<()> {
             },
             &brushes.surface_border,
             1.0,
-            None,
         );
         let (reset, _, back) = settings_footer_rects(width, state.footer_top());
         if let Some(status) = &state.status {
-            draw_text(
-                &target,
+            target.draw_text(
                 status,
                 &state.formats.metadata,
                 rect(140.0, footer_top, width as f32 - 74.0, height as f32 - 2.0),
@@ -5005,8 +5032,7 @@ fn draw_shortcuts_picker(state: &mut AppState) -> Result<()> {
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
             );
         } else {
-            draw_text(
-                &target,
+            target.draw_text(
                 "Enter rebinds the focused action",
                 &state.formats.center,
                 rect(140.0, footer_top, width as f32 - 74.0, height as f32 - 2.0),
@@ -5051,14 +5077,12 @@ fn draw_search_picker(state: &mut AppState) -> Result<()> {
     unsafe {
         target.BeginDraw();
         target.Clear(Some(&color(0x101217)));
-        target.DrawRoundedRectangle(
+        target.stroke_rounded(
             &rounded_rect(0.5, 0.5, width as f32 - 0.5, height as f32 - 0.5, 11.0),
             &brushes.surface_border,
             1.0,
-            None,
         );
-        draw_text(
-            &target,
+        target.draw_text(
             "WinMoji",
             &state.formats.label,
             rect(18.0, 7.0, 180.0, 34.0),
@@ -5102,8 +5126,8 @@ fn draw_search_picker(state: &mut AppState) -> Result<()> {
         12.0,
     );
     unsafe {
-        target.FillRoundedRectangle(&search, &brushes.surface);
-        target.DrawRoundedRectangle(&search, &brushes.surface_border, 1.0, None);
+        target.fill_rounded(&search, &brushes.surface);
+        target.stroke_rounded(&search, &brushes.surface_border, 1.0);
         target.DrawEllipse(
             &D2D1_ELLIPSE {
                 point: Vector2 {
@@ -5117,7 +5141,7 @@ fn draw_search_picker(state: &mut AppState) -> Result<()> {
             1.7,
             None,
         );
-        target.DrawLine(
+        target.draw_line(
             Vector2 {
                 X: 35.5,
                 Y: (SEARCH_TOP + SEARCH_HEIGHT / 2 + 4) as f32,
@@ -5128,7 +5152,6 @@ fn draw_search_picker(state: &mut AppState) -> Result<()> {
             },
             &brushes.secondary,
             1.7,
-            None,
         );
         draw_search_text(state, &target, &brushes)?;
         if !state.query().trim().is_empty() {
@@ -5171,7 +5194,7 @@ fn draw_search_picker(state: &mut AppState) -> Result<()> {
     }
 
     unsafe {
-        target.DrawLine(
+        target.draw_line(
             Vector2 {
                 X: 16.0,
                 Y: footer_top,
@@ -5182,13 +5205,11 @@ fn draw_search_picker(state: &mut AppState) -> Result<()> {
             },
             &brushes.surface_border,
             1.0,
-            None,
         );
         let (cap, copy, insert) = footer_button_rects(width, state.footer_top());
         let information = rect(14.0, footer_top, cap.left - 10.0, height as f32 - 2.0);
         if let Some(status) = &state.status {
-            draw_text(
-                &target,
+            target.draw_text(
                 status,
                 &state.formats.metadata,
                 information,
@@ -5248,8 +5269,7 @@ fn draw_search_text(
     let top = SEARCH_TOP as f32 + 4.0;
     let bottom = (SEARCH_TOP + SEARCH_HEIGHT) as f32 - 4.0;
     if state.search.text.is_empty() {
-        draw_text(
-            target,
+        target.draw_text(
             "Search names, symbols, or code points",
             &state.formats.search,
             rect(text_left, top, text_right, bottom),
@@ -5280,15 +5300,12 @@ fn draw_search_text(
     let origin_x = text_left - state.search.scroll;
 
     unsafe {
-        target.PushAxisAlignedClip(
-            &rect(text_left, top, text_right, bottom),
-            D2D1_ANTIALIAS_MODE_ALIASED,
-        );
+        target.push_clip(&rect(text_left, top, text_right, bottom));
         if state.search.has_selection() {
             let (start, end) = state.search.selection();
             let start_x = layout_caret_x(&layout, utf16_offset(start))?;
             let end_x = layout_caret_x(&layout, utf16_offset(end))?;
-            target.FillRectangle(
+            target.fill_rect(
                 &rect(
                     origin_x + start_x,
                     top + 3.0,
@@ -5308,7 +5325,7 @@ fn draw_search_text(
             D2D1_DRAW_TEXT_OPTIONS_NONE,
         );
         let caret_line_x = (origin_x + caret_x).clamp(text_left, text_right - 1.0);
-        target.DrawLine(
+        target.draw_line(
             Vector2 {
                 X: caret_line_x,
                 Y: top + 5.0,
@@ -5319,9 +5336,8 @@ fn draw_search_text(
             },
             &brushes.accent,
             1.6,
-            None,
         );
-        target.PopAxisAlignedClip();
+        target.pop_clip();
     }
     Ok(())
 }
@@ -5351,74 +5367,66 @@ fn draw_browser(
     let target = &resources.target;
     let (width, _) = state.dimensions();
     let category_viewport = category_viewport(width);
-    unsafe {
-        target.PushAxisAlignedClip(&category_viewport, D2D1_ANTIALIAS_MODE_ALIASED);
-    }
+    target.push_clip(&category_viewport);
     for (index, category) in BrowseCategory::ALL.iter().enumerate() {
         let bounds = category_rect(width, state.category_scroll, index);
         if bounds.right <= category_viewport.left || bounds.left >= category_viewport.right {
             continue;
         }
         let active = index == state.active_category;
-        unsafe {
-            if active {
-                target.FillRoundedRectangle(
-                    &rounded_rect(
-                        bounds.left + 2.0,
-                        bounds.top + 2.0,
-                        bounds.right - 2.0,
-                        bounds.bottom - 3.0,
-                        7.0,
-                    ),
-                    selection,
-                );
-                target.FillRoundedRectangle(
-                    &rounded_rect(
-                        bounds.left + 12.0,
-                        bounds.bottom - 3.0,
-                        bounds.right - 12.0,
-                        bounds.bottom - 1.0,
-                        1.0,
-                    ),
-                    accent,
-                );
-            }
-            if let Some(entry_index) = state.category_icon_entries[index] {
-                draw_glyph(
-                    state,
-                    resources,
-                    entry_index,
-                    rect(
-                        bounds.left + 4.0,
-                        bounds.top + 3.0,
-                        bounds.right - 4.0,
-                        bounds.bottom - 5.0,
-                    ),
-                    if active { primary } else { secondary },
-                );
+        if active {
+            target.fill_rounded(
+                &rounded_rect(
+                    bounds.left + 2.0,
+                    bounds.top + 2.0,
+                    bounds.right - 2.0,
+                    bounds.bottom - 3.0,
+                    7.0,
+                ),
+                selection,
+            );
+            target.fill_rounded(
+                &rounded_rect(
+                    bounds.left + 12.0,
+                    bounds.bottom - 3.0,
+                    bounds.right - 12.0,
+                    bounds.bottom - 1.0,
+                    1.0,
+                ),
+                accent,
+            );
+        }
+        if let Some(entry_index) = state.category_icon_entries[index] {
+            draw_glyph(
+                state,
+                resources,
+                entry_index,
+                rect(
+                    bounds.left + 4.0,
+                    bounds.top + 3.0,
+                    bounds.right - 4.0,
+                    bounds.bottom - 5.0,
+                ),
+                if active { primary } else { secondary },
+            );
+        } else {
+            let format = if *category == BrowseCategory::Emoticons {
+                &state.formats.emoticon_icon
             } else {
-                let format = if *category == BrowseCategory::Emoticons {
-                    &state.formats.emoticon_icon
-                } else {
-                    &state.formats.symbol
-                };
-                draw_text(
-                    target,
-                    category.icon(),
-                    format,
-                    bounds,
-                    if active { primary } else { secondary },
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
-            }
+                &state.formats.symbol
+            };
+            target.draw_text(
+                category.icon(),
+                format,
+                bounds,
+                if active { primary } else { secondary },
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
         }
     }
-    unsafe {
-        target.PopAxisAlignedClip();
-    }
+    target.pop_clip();
     if let Some((left, right)) = category_edge_rects(width) {
-        draw_text(
-            target,
+        target.draw_text(
             "<",
             &state.formats.center_title,
             left,
@@ -5429,8 +5437,7 @@ fn draw_browser(
             },
             D2D1_DRAW_TEXT_OPTIONS_NONE,
         );
-        draw_text(
-            target,
+        target.draw_text(
             ">",
             &state.formats.center_title,
             right,
@@ -5442,17 +5449,12 @@ fn draw_browser(
             D2D1_DRAW_TEXT_OPTIONS_NONE,
         );
     }
-    unsafe {
-        target.PushAxisAlignedClip(
-            &rect(
-                0.0,
-                BROWSE_CONTENT_TOP as f32,
-                width as f32,
-                state.footer_top() as f32,
-            ),
-            D2D1_ANTIALIAS_MODE_ALIASED,
-        );
-    }
+    target.push_clip(&rect(
+        0.0,
+        BROWSE_CONTENT_TOP as f32,
+        width as f32,
+        state.footer_top() as f32,
+    ));
     let layouts = state.section_layouts();
     let viewport_top = state.browse_scroll;
     let viewport_bottom = state.browse_scroll + (state.footer_top() - BROWSE_CONTENT_TOP) as f32;
@@ -5463,8 +5465,7 @@ fn draw_browser(
         if heading_y + SECTION_HEADING_HEIGHT as f32 >= BROWSE_CONTENT_TOP as f32
             && heading_y < state.footer_top() as f32
         {
-            draw_text(
-                target,
+            target.draw_text(
                 section.category.heading(),
                 &state.formats.label,
                 rect(
@@ -5500,39 +5501,35 @@ fn draw_browser(
                 Some(HitTarget::BrowseItem { section, item })
                     if section == section_index && item == item_index
             );
-            unsafe {
-                let tile = rounded_rect(
-                    left + 3.0,
-                    top + 3.0,
-                    left + layout.cell_width - 3.0,
-                    top + layout.cell_height as f32 - 3.0,
-                    9.0,
-                );
-                target.FillRoundedRectangle(
-                    &tile,
-                    if selected_item || hovered {
-                        selection
-                    } else {
-                        glyph_surface
-                    },
-                );
-                if selected_item {
-                    target.DrawRoundedRectangle(&tile, selection_border, 1.0, None);
-                }
-                let glyph_bounds = rect(
-                    left + 5.0,
-                    top + 3.0,
-                    left + layout.cell_width - 5.0,
-                    top + layout.cell_height as f32 - 3.0,
-                );
-                draw_glyph(state, resources, entry_index, glyph_bounds, primary);
+            let tile = rounded_rect(
+                left + 3.0,
+                top + 3.0,
+                left + layout.cell_width - 3.0,
+                top + layout.cell_height as f32 - 3.0,
+                9.0,
+            );
+            target.fill_rounded(
+                &tile,
+                if selected_item || hovered {
+                    selection
+                } else {
+                    glyph_surface
+                },
+            );
+            if selected_item {
+                target.stroke_rounded(&tile, selection_border, 1.0);
             }
+            let glyph_bounds = rect(
+                left + 5.0,
+                top + 3.0,
+                left + layout.cell_width - 5.0,
+                top + layout.cell_height as f32 - 3.0,
+            );
+            draw_glyph(state, resources, entry_index, glyph_bounds, primary);
         }
     }
-    unsafe {
-        target.PopAxisAlignedClip();
-        draw_list_scrollbar(state, resources);
-    }
+    target.pop_clip();
+    draw_list_scrollbar(state, resources);
 }
 
 /// The Shift key cap beside the footer actions. It carries no words: it is
@@ -5547,40 +5544,36 @@ fn draw_shift_cap(
 ) {
     let active = state.keep_open();
     let hovered = matches!(state.hovered_target, Some(HitTarget::ShiftCap));
-    unsafe {
-        let cap = rounded_rect(
-            bounds.left,
-            bounds.top + 3.0,
-            bounds.right,
-            bounds.bottom - 3.0,
-            6.0,
-        );
-        if active {
-            target.FillRoundedRectangle(&cap, &brushes.selection);
-        }
-        target.DrawRoundedRectangle(
-            &cap,
-            if active || hovered {
-                &brushes.selection_border
-            } else {
-                &brushes.surface_border
-            },
-            1.0,
-            None,
-        );
-        draw_text(
-            target,
-            "⇧",
-            &state.formats.icon,
-            rect(bounds.left, bounds.top + 1.0, bounds.right, bounds.bottom),
-            if active {
-                &brushes.primary
-            } else {
-                &brushes.secondary
-            },
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-        );
+    let cap = rounded_rect(
+        bounds.left,
+        bounds.top + 3.0,
+        bounds.right,
+        bounds.bottom - 3.0,
+        6.0,
+    );
+    if active {
+        target.fill_rounded(&cap, &brushes.selection);
     }
+    target.stroke_rounded(
+        &cap,
+        if active || hovered {
+            &brushes.selection_border
+        } else {
+            &brushes.surface_border
+        },
+        1.0,
+    );
+    target.draw_text(
+        "⇧",
+        &state.formats.icon,
+        rect(bounds.left, bounds.top + 1.0, bounds.right, bounds.bottom),
+        if active {
+            &brushes.primary
+        } else {
+            &brushes.secondary
+        },
+        D2D1_DRAW_TEXT_OPTIONS_NONE,
+    );
 }
 
 /// Draw the scrollbar for whichever list is on screen. The grip carries both
@@ -5593,32 +5586,30 @@ fn draw_list_scrollbar(state: &AppState, resources: &RenderResources) {
     let brushes = &resources.brushes;
     let gripped = matches!(state.hovered_target, Some(HitTarget::Scrollbar))
         || state.dragging_scrollbar.is_some();
-    unsafe {
-        resources.target.FillRoundedRectangle(
-            &rounded_rect(
-                width as f32 - 7.0,
-                track.top,
-                width as f32 - 4.0,
-                track.bottom,
-                1.5,
-            ),
-            &brushes.surface,
-        );
-        resources.target.FillRoundedRectangle(
-            &rounded_rect(
-                thumb.left,
-                thumb.top,
-                thumb.right,
-                thumb.bottom,
-                (thumb.right - thumb.left) / 2.0,
-            ),
-            if gripped {
-                &brushes.selection_border
-            } else {
-                &brushes.surface_border
-            },
-        );
-    }
+    resources.target.fill_rounded(
+        &rounded_rect(
+            width as f32 - 7.0,
+            track.top,
+            width as f32 - 4.0,
+            track.bottom,
+            1.5,
+        ),
+        &brushes.surface,
+    );
+    resources.target.fill_rounded(
+        &rounded_rect(
+            thumb.left,
+            thumb.top,
+            thumb.right,
+            thumb.bottom,
+            (thumb.right - thumb.left) / 2.0,
+        ),
+        if gripped {
+            &brushes.selection_border
+        } else {
+            &brushes.surface_border
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5636,12 +5627,7 @@ fn draw_search_results(
     let (width, _) = state.dimensions();
     let viewport_top = SEARCH_RESULTS_TOP as f32;
     let viewport_bottom = state.footer_top() as f32;
-    unsafe {
-        target.PushAxisAlignedClip(
-            &rect(0.0, viewport_top, width as f32, viewport_bottom),
-            D2D1_ANTIALIAS_MODE_ALIASED,
-        );
-    }
+    target.push_clip(&rect(0.0, viewport_top, width as f32, viewport_bottom));
     for (row, found) in state.matches.iter().enumerate() {
         let top = viewport_top + row as f32 * RESULT_ROW_HEIGHT as f32 - state.result_scroll;
         if top + RESULT_ROW_HEIGHT as f32 <= viewport_top {
@@ -5654,67 +5640,60 @@ fn draw_search_results(
         let hovered =
             matches!(state.hovered_target, Some(HitTarget::SearchResult(index)) if index == row);
         if row == state.selected || hovered {
-            unsafe {
-                let bounds = rounded_rect(
-                    12.0,
-                    top + 1.0,
-                    width as f32 - 12.0,
-                    top + RESULT_ROW_HEIGHT as f32 - 2.0,
-                    8.0,
+            let bounds = rounded_rect(
+                12.0,
+                top + 1.0,
+                width as f32 - 12.0,
+                top + RESULT_ROW_HEIGHT as f32 - 2.0,
+                8.0,
+            );
+            target.fill_rounded(&bounds, selection);
+            if row == state.selected {
+                target.stroke_rounded(&bounds, selection_border, 1.0);
+                target.fill_rounded(
+                    &rounded_rect(
+                        12.0,
+                        top + 10.0,
+                        15.0,
+                        top + RESULT_ROW_HEIGHT as f32 - 10.0,
+                        1.5,
+                    ),
+                    accent,
                 );
-                target.FillRoundedRectangle(&bounds, selection);
-                if row == state.selected {
-                    target.DrawRoundedRectangle(&bounds, selection_border, 1.0, None);
-                    target.FillRoundedRectangle(
-                        &rounded_rect(
-                            12.0,
-                            top + 10.0,
-                            15.0,
-                            top + RESULT_ROW_HEIGHT as f32 - 10.0,
-                            1.5,
-                        ),
-                        accent,
-                    );
-                }
             }
         }
-        unsafe {
-            target.FillRoundedRectangle(
-                &rounded_rect(
-                    20.0,
-                    top + 4.0,
-                    54.0,
-                    top + RESULT_ROW_HEIGHT as f32 - 4.0,
-                    7.0,
-                ),
-                glyph_surface,
-            );
-            draw_glyph(
-                state,
-                resources,
-                found.index,
-                rect(22.0, top + 2.0, 52.0, top + RESULT_ROW_HEIGHT as f32 - 2.0),
-                primary,
-            );
-            draw_text(
-                target,
-                &entry.name,
-                &state.formats.title,
-                rect(
-                    64.0,
-                    top,
-                    width as f32 - 20.0,
-                    top + RESULT_ROW_HEIGHT as f32,
-                ),
-                primary,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-        }
+        target.fill_rounded(
+            &rounded_rect(
+                20.0,
+                top + 4.0,
+                54.0,
+                top + RESULT_ROW_HEIGHT as f32 - 4.0,
+                7.0,
+            ),
+            glyph_surface,
+        );
+        draw_glyph(
+            state,
+            resources,
+            found.index,
+            rect(22.0, top + 2.0, 52.0, top + RESULT_ROW_HEIGHT as f32 - 2.0),
+            primary,
+        );
+        target.draw_text(
+            &entry.name,
+            &state.formats.title,
+            rect(
+                64.0,
+                top,
+                width as f32 - 20.0,
+                top + RESULT_ROW_HEIGHT as f32,
+            ),
+            primary,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
     }
-    unsafe {
-        target.PopAxisAlignedClip();
-        draw_list_scrollbar(state, resources);
-    }
+    target.pop_clip();
+    draw_list_scrollbar(state, resources);
     if state.matches.is_empty() {
         let query = state.query();
         let headline = if query.chars().count() <= 24 {
@@ -5723,16 +5702,14 @@ fn draw_search_results(
             "No matching character".to_string()
         };
         let center_y = (SEARCH_RESULTS_TOP as f32 + state.footer_top() as f32) / 2.0;
-        draw_text(
-            target,
+        target.draw_text(
             &headline,
             &state.formats.center_title,
             rect(24.0, center_y - 28.0, width as f32 - 24.0, center_y),
             primary,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
         );
-        draw_text(
-            target,
+        target.draw_text(
             "Try fewer letters, or click the grid to browse",
             &state.formats.center,
             rect(24.0, center_y + 2.0, width as f32 - 24.0, center_y + 28.0),
@@ -5759,14 +5736,12 @@ fn draw_settings_picker(state: &mut AppState) -> Result<()> {
     unsafe {
         target.BeginDraw();
         target.Clear(Some(&color(0x101217)));
-        target.DrawRoundedRectangle(
+        target.stroke_rounded(
             &rounded_rect(0.5, 0.5, width as f32 - 0.5, height as f32 - 0.5, 11.0),
             &border,
             1.0,
-            None,
         );
-        draw_text(
-            &target,
+        target.draw_text(
             "Settings",
             &state.formats.label,
             rect(18.0, 7.0, 160.0, 34.0),
@@ -5774,10 +5749,12 @@ fn draw_settings_picker(state: &mut AppState) -> Result<()> {
             D2D1_DRAW_TEXT_OPTIONS_NONE,
         );
         draw_header_button(&target, state, width, 0, "×", &selection, &secondary);
-        target.PushAxisAlignedClip(
-            &rect(0.0, SETTINGS_LIST_TOP as f32, width as f32, footer_top),
-            D2D1_ANTIALIAS_MODE_ALIASED,
-        );
+        target.push_clip(&rect(
+            0.0,
+            SETTINGS_LIST_TOP as f32,
+            width as f32,
+            footer_top,
+        ));
     }
 
     let settings = [
@@ -5812,21 +5789,17 @@ fn draw_settings_picker(state: &mut AppState) -> Result<()> {
             continue;
         }
         if index == state.settings_selected {
-            unsafe {
-                target.FillRoundedRectangle(
-                    &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 8.0),
-                    &selection,
-                );
-                target.DrawRoundedRectangle(
-                    &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 8.0),
-                    &selection_border,
-                    1.0,
-                    None,
-                );
-            }
+            target.fill_rounded(
+                &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 8.0),
+                &selection,
+            );
+            target.stroke_rounded(
+                &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 8.0),
+                &selection_border,
+                1.0,
+            );
         }
-        draw_text(
-            &target,
+        target.draw_text(
             label,
             &state.formats.label,
             rect(24.0, bounds.top, width as f32 * 0.44, bounds.bottom),
@@ -5865,17 +5838,16 @@ fn draw_settings_picker(state: &mut AppState) -> Result<()> {
 
     let hint_top = settings_row_rect(width, SETTINGS_ROWS - 1, state.settings_scroll).bottom + 8.0;
     unsafe {
-        draw_text(
-            &target,
+        target.draw_text(
             "Arrow keys adjust. Enter changes the focused value.",
             &state.formats.center,
             rect(24.0, hint_top, width as f32 - 24.0, hint_top + 22.0),
             &secondary,
             D2D1_DRAW_TEXT_OPTIONS_CLIP,
         );
-        target.PopAxisAlignedClip();
+        target.pop_clip();
         draw_list_scrollbar(state, &resources);
-        target.DrawLine(
+        target.draw_line(
             Vector2 {
                 X: 16.0,
                 Y: footer_top,
@@ -5886,12 +5858,10 @@ fn draw_settings_picker(state: &mut AppState) -> Result<()> {
             },
             &border,
             1.0,
-            None,
         );
         let (discard, reset, back) = settings_footer_rects(width, state.footer_top());
         if let Some(status) = &state.status {
-            draw_text(
-                &target,
+            target.draw_text(
                 status,
                 &state.formats.metadata,
                 rect(140.0, footer_top, width as f32 - 74.0, height as f32 - 2.0),
@@ -5899,8 +5869,7 @@ fn draw_settings_picker(state: &mut AppState) -> Result<()> {
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
             );
         } else {
-            draw_text(
-                &target,
+            target.draw_text(
                 "Esc goes back",
                 &state.formats.center,
                 rect(140.0, footer_top, width as f32 - 74.0, height as f32 - 2.0),
@@ -5954,27 +5923,24 @@ fn draw_header_button(
     text: &ID2D1SolidColorBrush,
 ) {
     let bounds = header_button_rect(width, position);
-    unsafe {
-        if state.hovered_target.is_some_and(|hovered| {
-            matches!(
-                (position, hovered),
-                (0, HitTarget::Close) | (1, HitTarget::Settings) | (2, HitTarget::Browse)
-            )
-        }) {
-            target.FillRoundedRectangle(
-                &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 6.0),
-                surface,
-            );
-        }
-        draw_text(
-            target,
-            label,
-            &state.formats.icon,
-            bounds,
-            text,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
+    if state.hovered_target.is_some_and(|hovered| {
+        matches!(
+            (position, hovered),
+            (0, HitTarget::Close) | (1, HitTarget::Settings) | (2, HitTarget::Browse)
+        )
+    }) {
+        target.fill_rounded(
+            &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 6.0),
+            surface,
         );
     }
+    target.draw_text(
+        label,
+        &state.formats.icon,
+        bounds,
+        text,
+        D2D1_DRAW_TEXT_OPTIONS_NONE,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5988,26 +5954,16 @@ fn draw_button(
     text: &ID2D1SolidColorBrush,
     format: &IDWriteTextFormat,
 ) {
-    unsafe {
-        target.FillRoundedRectangle(
-            &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 6.0),
-            surface,
-        );
-        target.DrawRoundedRectangle(
-            &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 6.0),
-            border,
-            if hovered { 1.5 } else { 1.0 },
-            None,
-        );
-        draw_text(
-            target,
-            label,
-            format,
-            bounds,
-            text,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-        );
-    }
+    target.fill_rounded(
+        &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 6.0),
+        surface,
+    );
+    target.stroke_rounded(
+        &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 6.0),
+        border,
+        if hovered { 1.5 } else { 1.0 },
+    );
+    target.draw_text(label, format, bounds, text, D2D1_DRAW_TEXT_OPTIONS_NONE);
 }
 
 /// The sample entry every settings preview is drawn from.
@@ -6029,16 +5985,14 @@ fn draw_setting_value(
     let primary = &brushes.primary;
     let secondary = &brushes.secondary;
     let selection_border = &brushes.selection_border;
-    draw_text(
-        target,
+    target.draw_text(
         "‹",
         &state.formats.brand,
         rect(bounds.left, bounds.top, bounds.left + 14.0, bounds.bottom),
         secondary,
         D2D1_DRAW_TEXT_OPTIONS_NONE,
     );
-    draw_text(
-        target,
+    target.draw_text(
         "›",
         &state.formats.brand,
         rect(bounds.right - 14.0, bounds.top, bounds.right, bounds.bottom),
@@ -6054,7 +6008,7 @@ fn draw_setting_value(
     match index {
         // Hover details: a hovered row drawn the way the picker draws one,
         // carrying the footer line the mode produces.
-        3 => unsafe {
+        3 => {
             let row = rounded_rect(
                 inner.left,
                 inner.top + 1.0,
@@ -6062,40 +6016,37 @@ fn draw_setting_value(
                 inner.bottom - 1.0,
                 7.0,
             );
-            target.FillRoundedRectangle(&row, &brushes.selection);
-            target.DrawRoundedRectangle(&row, selection_border, 1.0, None);
+            target.fill_rounded(&row, &brushes.selection);
+            target.stroke_rounded(&row, selection_border, 1.0);
             let tile = rect(
                 inner.left + 5.0,
                 inner.top + 5.0,
                 inner.left + 31.0,
                 inner.bottom - 5.0,
             );
-            target.FillRoundedRectangle(
+            target.fill_rounded(
                 &rounded_rect(tile.left, tile.top, tile.right, tile.bottom, 6.0),
                 &brushes.glyph_surface,
             );
-            draw_text(
-                target,
+            target.draw_text(
                 PREVIEW_GLYPH,
                 &state.formats.glyph_small,
                 tile,
                 primary,
                 D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
             );
-            draw_text(
-                target,
+            target.draw_text(
                 &preview_details_line(state),
                 &state.formats.metadata,
                 rect(tile.right + 7.0, inner.top, inner.right - 6.0, inner.bottom),
                 secondary,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
             );
-        },
+        }
         // Emoji font: the same glyphs under the chosen face.
         4 => {
             let sample = rect(inner.left, inner.top, inner.left + 74.0, inner.bottom);
-            draw_text(
-                target,
+            target.draw_text(
                 "😀 ✋ 🚀",
                 &state.formats.glyph_small,
                 sample,
@@ -6106,8 +6057,7 @@ fn draw_setting_value(
                     D2D1_DRAW_TEXT_OPTIONS_NONE
                 },
             );
-            draw_text(
-                target,
+            target.draw_text(
                 value,
                 &state.formats.metadata,
                 rect(sample.right + 6.0, inner.top, inner.right, inner.bottom),
@@ -6124,18 +6074,14 @@ fn draw_setting_value(
                 let left = strip + position as f32 * step;
                 let cell = rect(left, inner.top + 2.0, left + step, inner.bottom - 2.0);
                 if *tone == state.config.skin_tone {
-                    unsafe {
-                        target.DrawRoundedRectangle(
-                            &rounded_rect(cell.left, cell.top, cell.right, cell.bottom, 6.0),
-                            selection_border,
-                            1.2,
-                            None,
-                        );
-                    }
+                    target.stroke_rounded(
+                        &rounded_rect(cell.left, cell.top, cell.right, cell.bottom, 6.0),
+                        selection_border,
+                        1.2,
+                    );
                 }
                 let toned = catalog::toned(PREVIEW_GLYPH, *tone).unwrap_or(PREVIEW_GLYPH);
-                draw_text(
-                    target,
+                target.draw_text(
                     toned,
                     &state.formats.glyph_small,
                     cell,
@@ -6145,8 +6091,7 @@ fn draw_setting_value(
             }
         }
         _ => {
-            draw_text(
-                target,
+            target.draw_text(
                 value,
                 &state.formats.brand,
                 inner,
@@ -6192,21 +6137,18 @@ fn draw_resize_grip(state: &AppState, target: &ID2D1RenderTarget, brushes: &Brus
     };
     for step in 0..3 {
         let inset = 3.0 + step as f32 * 4.5;
-        unsafe {
-            target.DrawLine(
-                Vector2 {
-                    X: grip.right - inset,
-                    Y: grip.bottom,
-                },
-                Vector2 {
-                    X: grip.right,
-                    Y: grip.bottom - inset,
-                },
-                brush,
-                1.4,
-                None,
-            );
-        }
+        target.draw_line(
+            Vector2 {
+                X: grip.right - inset,
+                Y: grip.bottom,
+            },
+            Vector2 {
+                X: grip.right,
+                Y: grip.bottom - inset,
+            },
+            brush,
+            1.4,
+        );
     }
 }
 
@@ -6216,59 +6158,54 @@ fn draw_tone_picker(state: &AppState, target: &ID2D1RenderTarget, brushes: &Brus
     };
     let (popup, tiles) = tone_picker_layout(state, picker);
     let base = &catalog::entries()[picker.entry_index].glyph;
-    unsafe {
-        target.FillRoundedRectangle(
-            &rounded_rect(popup.left, popup.top, popup.right, popup.bottom, 8.0),
-            &brushes.surface,
+    target.fill_rounded(
+        &rounded_rect(popup.left, popup.top, popup.right, popup.bottom, 8.0),
+        &brushes.surface,
+    );
+    target.stroke_rounded(
+        &rounded_rect(popup.left, popup.top, popup.right, popup.bottom, 8.0),
+        &brushes.selection_border,
+        1.0,
+    );
+    for (index, tile) in tiles.iter().enumerate() {
+        let tone = SkinTone::ALL[index];
+        let hovered = matches!(
+            state.hovered_target,
+            Some(HitTarget::ToneOption(hovered)) if hovered == index
         );
-        target.DrawRoundedRectangle(
-            &rounded_rect(popup.left, popup.top, popup.right, popup.bottom, 8.0),
-            &brushes.selection_border,
-            1.0,
-            None,
-        );
-        for (index, tile) in tiles.iter().enumerate() {
-            let tone = SkinTone::ALL[index];
-            let hovered = matches!(
-                state.hovered_target,
-                Some(HitTarget::ToneOption(hovered)) if hovered == index
-            );
-            if hovered {
-                target.FillRoundedRectangle(
-                    &rounded_rect(
-                        tile.left + 1.0,
-                        tile.top + 1.0,
-                        tile.right - 1.0,
-                        tile.bottom - 1.0,
-                        7.0,
-                    ),
-                    &brushes.selection,
-                );
-            }
-            let glyph = catalog::toned(base, tone).unwrap_or(base);
-            draw_text(
-                target,
-                glyph,
-                &state.formats.glyph,
-                *tile,
-                &brushes.primary,
-                D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+        if hovered {
+            target.fill_rounded(
+                &rounded_rect(
+                    tile.left + 1.0,
+                    tile.top + 1.0,
+                    tile.right - 1.0,
+                    tile.bottom - 1.0,
+                    7.0,
+                ),
+                &brushes.selection,
             );
         }
-        draw_text(
-            target,
-            "Inserts once · default is in Settings",
-            &state.formats.center,
-            rect(
-                popup.left,
-                popup.bottom - 24.0,
-                popup.right,
-                popup.bottom - 4.0,
-            ),
-            &brushes.secondary,
-            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+        let glyph = catalog::toned(base, tone).unwrap_or(base);
+        target.draw_text(
+            glyph,
+            &state.formats.glyph,
+            *tile,
+            &brushes.primary,
+            D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
         );
     }
+    target.draw_text(
+        "Inserts once · default is in Settings",
+        &state.formats.center,
+        rect(
+            popup.left,
+            popup.bottom - 24.0,
+            popup.right,
+            popup.bottom - 4.0,
+        ),
+        &brushes.secondary,
+        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    );
 }
 
 fn draw_hover_help(
@@ -6345,26 +6282,22 @@ fn draw_hover_help(
     let anchor_center = (anchor.left + anchor.right) / 2.0;
     let left = (anchor_center - tooltip_width / 2.0).clamp(8.0, width as f32 - tooltip_width - 8.0);
     let bounds = rect(left, top, left + tooltip_width, top + 25.0);
-    unsafe {
-        target.FillRoundedRectangle(
-            &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 6.0),
-            surface,
-        );
-        target.DrawRoundedRectangle(
-            &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 6.0),
-            border,
-            1.0,
-            None,
-        );
-        draw_text(
-            target,
-            help,
-            &state.formats.center,
-            bounds,
-            text,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-        );
-    }
+    target.fill_rounded(
+        &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 6.0),
+        surface,
+    );
+    target.stroke_rounded(
+        &rounded_rect(bounds.left, bounds.top, bounds.right, bounds.bottom, 6.0),
+        border,
+        1.0,
+    );
+    target.draw_text(
+        help,
+        &state.formats.center,
+        bounds,
+        text,
+        D2D1_DRAW_TEXT_OPTIONS_NONE,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6386,7 +6319,7 @@ fn draw_slider(
     let ratio = (value - minimum) as f32 / (maximum - minimum) as f32;
     let thumb = line_left + (line_right - line_left) * ratio;
     unsafe {
-        target.DrawLine(
+        target.draw_line(
             Vector2 {
                 X: line_left,
                 Y: center,
@@ -6397,9 +6330,8 @@ fn draw_slider(
             },
             track,
             3.0,
-            None,
         );
-        target.DrawLine(
+        target.draw_line(
             Vector2 {
                 X: line_left,
                 Y: center,
@@ -6410,7 +6342,6 @@ fn draw_slider(
             },
             accent,
             3.0,
-            None,
         );
         target.FillEllipse(
             &D2D1_ELLIPSE {
@@ -6423,8 +6354,7 @@ fn draw_slider(
             },
             accent,
         );
-        draw_text(
-            target,
+        target.draw_text(
             label,
             format,
             rect(line_right + 6.0, bounds.top, bounds.right, bounds.bottom),
@@ -6483,8 +6413,7 @@ fn draw_glyph(
         } else {
             &state.formats.emoticon_small
         };
-        draw_text(
-            target,
+        target.draw_text(
             &entry.glyph,
             format,
             bounds,
@@ -6510,7 +6439,7 @@ fn draw_glyph(
     } else {
         D2D1_DRAW_TEXT_OPTIONS_NONE
     };
-    draw_text(target, &entry.glyph, format, bounds, brush, options);
+    target.draw_text(&entry.glyph, format, bounds, brush, options);
 }
 
 fn draw_entry_information(
@@ -6520,8 +6449,7 @@ fn draw_entry_information(
     brush: &ID2D1SolidColorBrush,
 ) {
     let Some(index) = state.hover_or_selected_entry() else {
-        draw_text(
-            target,
+        target.draw_text(
             "Type to search or scroll to browse",
             &state.formats.center,
             bounds,
@@ -6532,8 +6460,7 @@ fn draw_entry_information(
     };
     let entry = &catalog::entries()[index];
     let detail = detail_line(state.config.details, &entry.name, &entry.glyph, entry.kind);
-    draw_text(
-        target,
+    target.draw_text(
         &detail,
         &state.formats.metadata,
         bounds,
@@ -6572,24 +6499,79 @@ fn rounded_rect(left: f32, top: f32, right: f32, bottom: f32, radius: f32) -> D2
     }
 }
 
-fn draw_text(
-    target: &ID2D1RenderTarget,
-    text: &str,
-    format: &IDWriteTextFormat,
-    bounds: D2D_RECT_F,
-    brush: &ID2D1SolidColorBrush,
-    options: windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS,
-) {
-    let wide: Vec<_> = text.encode_utf16().collect();
-    unsafe {
-        target.DrawText(
-            &wide,
-            format,
-            &bounds,
-            brush,
-            options,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
+/// The drawing primitives the picker paints with, as safe methods.
+///
+/// Direct2D methods are unsafe because each one steps through a COM vtable.
+/// Receiving `&self` is what discharges that: the interface stays alive for
+/// the borrow, every geometry argument is passed by value or as a borrow that
+/// cannot outlive the call, and none of them hand Direct2D a pointer the
+/// caller has to keep valid afterwards. Scoping the unsafe to this one impl
+/// keeps it out of the drawing code, where the layout logic lives.
+trait Canvas {
+    fn fill_rounded(&self, bounds: &D2D1_ROUNDED_RECT, brush: &ID2D1SolidColorBrush);
+    fn stroke_rounded(&self, bounds: &D2D1_ROUNDED_RECT, brush: &ID2D1SolidColorBrush, width: f32);
+    fn fill_rect(&self, bounds: &D2D_RECT_F, brush: &ID2D1SolidColorBrush);
+    fn draw_line(&self, from: Vector2, to: Vector2, brush: &ID2D1SolidColorBrush, width: f32);
+    /// Clip to `bounds` until the matching [`Canvas::pop_clip`].
+    ///
+    /// Aliased edges are the only mode used here: the picker clips to whole
+    /// pixel-aligned panels, where antialiasing would leave a seam.
+    fn push_clip(&self, bounds: &D2D_RECT_F);
+    fn pop_clip(&self);
+    fn draw_text(
+        &self,
+        text: &str,
+        format: &IDWriteTextFormat,
+        bounds: D2D_RECT_F,
+        brush: &ID2D1SolidColorBrush,
+        options: windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS,
+    );
+}
+
+impl Canvas for ID2D1RenderTarget {
+    fn fill_rounded(&self, bounds: &D2D1_ROUNDED_RECT, brush: &ID2D1SolidColorBrush) {
+        unsafe { self.FillRoundedRectangle(bounds, brush) }
+    }
+
+    fn stroke_rounded(&self, bounds: &D2D1_ROUNDED_RECT, brush: &ID2D1SolidColorBrush, width: f32) {
+        unsafe { self.DrawRoundedRectangle(bounds, brush, width, None) }
+    }
+
+    fn fill_rect(&self, bounds: &D2D_RECT_F, brush: &ID2D1SolidColorBrush) {
+        unsafe { self.FillRectangle(bounds, brush) }
+    }
+
+    fn draw_line(&self, from: Vector2, to: Vector2, brush: &ID2D1SolidColorBrush, width: f32) {
+        unsafe { self.DrawLine(from, to, brush, width, None) }
+    }
+
+    fn push_clip(&self, bounds: &D2D_RECT_F) {
+        unsafe { self.PushAxisAlignedClip(bounds, D2D1_ANTIALIAS_MODE_ALIASED) }
+    }
+
+    fn pop_clip(&self) {
+        unsafe { self.PopAxisAlignedClip() }
+    }
+
+    fn draw_text(
+        &self,
+        text: &str,
+        format: &IDWriteTextFormat,
+        bounds: D2D_RECT_F,
+        brush: &ID2D1SolidColorBrush,
+        options: windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS,
+    ) {
+        let wide: Vec<_> = text.encode_utf16().collect();
+        unsafe {
+            self.DrawText(
+                &wide,
+                format,
+                &bounds,
+                brush,
+                options,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
     }
 }
 
@@ -6619,10 +6601,10 @@ fn to_wide(value: &str) -> Vec<u16> {
 }
 
 fn focused_child_for(target: HWND) -> HWND {
-    if target.is_invalid() || !unsafe { IsWindow(Some(target)).as_bool() } {
+    if target.is_invalid() || !is_window(target) {
         return HWND::default();
     }
-    let thread = unsafe { GetWindowThreadProcessId(target, None) };
+    let thread = window_thread(target);
     let mut information = GUITHREADINFO {
         cbSize: size_of::<GUITHREADINFO>() as u32,
         ..Default::default()
@@ -6639,12 +6621,12 @@ fn focused_child_for(target: HWND) -> HWND {
 
 fn valid_target_focus(target: HWND, focus: HWND) -> bool {
     !focus.is_invalid()
-        && unsafe { IsWindow(Some(focus)).as_bool() }
+        && is_window(focus)
         && (focus == target || unsafe { IsChild(target, focus).as_bool() })
 }
 
 fn inject_unicode(target: HWND, target_focus: HWND, value: &str) -> Result<()> {
-    if target.is_invalid() || !unsafe { IsWindow(Some(target)).as_bool() } {
+    if target.is_invalid() || !is_window(target) {
         return Err(Error::new(
             HRESULT(0x80070006u32 as i32),
             "the captured target window is no longer available",
@@ -6667,7 +6649,7 @@ fn inject_unicode(target: HWND, target_focus: HWND, value: &str) -> Result<()> {
     }
 
     let current_thread = unsafe { GetCurrentThreadId() };
-    let target_thread = unsafe { GetWindowThreadProcessId(target, None) };
+    let target_thread = window_thread(target);
     let attached = target_thread != 0
         && target_thread != current_thread
         && unsafe { AttachThreadInput(current_thread, target_thread, true).as_bool() };
@@ -6945,7 +6927,7 @@ fn self_test() -> Result<()> {
     unsafe {
         println!("hotkey: PASS (Ctrl+Alt+Shift+F24, MOD_NOREPEAT)");
 
-        if !previous.is_invalid() && IsWindow(Some(previous)).as_bool() {
+        if !previous.is_invalid() && is_window(previous) {
             let _ = SetForegroundWindow(previous);
             for _ in 0..20 {
                 if foreground_window() == previous {
@@ -6986,7 +6968,7 @@ fn self_test() -> Result<()> {
         let mut buffer = vec![0u16; length as usize + 1];
         let copied = GetWindowTextW(edit, &mut buffer);
         let inserted = String::from_utf16_lossy(&buffer[..copied as usize]);
-        if !previous.is_invalid() && IsWindow(Some(previous)).as_bool() {
+        if !previous.is_invalid() && is_window(previous) {
             let _ = SetForegroundWindow(previous);
         }
         if inserted != "λ→🙂" {
@@ -7064,7 +7046,7 @@ impl SelfTestWindow {
             let foreground_thread = if foreground.is_invalid() {
                 0
             } else {
-                GetWindowThreadProcessId(foreground, None)
+                window_thread(foreground)
             };
             let attached = foreground_thread != 0
                 && foreground_thread != current_thread
@@ -7087,7 +7069,7 @@ impl SelfTestWindow {
                 return;
             }
             let mut message = MSG::default();
-            while IsWindow(Some(edit)).as_bool() {
+            while is_window(edit) {
                 while windows::Win32::UI::WindowsAndMessaging::PeekMessageW(
                     &mut message,
                     None,
