@@ -589,6 +589,275 @@ impl fmt::Display for SkinTone {
     }
 }
 
+/// The ten colours the picker paints with, as `0xRRGGBB`.
+///
+/// Roles rather than names: a theme decides what its own greens and blues
+/// mean here, so the drawing code never asks for a colour by hue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Palette {
+    /// Behind the whole window.
+    pub background: u32,
+    /// Panels, rows and the search field.
+    pub surface: u32,
+    pub surface_border: u32,
+    /// The focused row or cell.
+    pub selection: u32,
+    pub selection_border: u32,
+    /// The tile a glyph sits on in the browse grid.
+    pub glyph_surface: u32,
+    /// Body text.
+    pub primary: u32,
+    /// Supporting text: code points, hints, placeholders.
+    pub secondary: u32,
+    /// The caret, the scrollbar grip and anything asking for attention.
+    pub accent: u32,
+    /// Errors.
+    pub danger: u32,
+}
+
+impl Palette {
+    /// The role names accepted as `color_<role>` configuration keys.
+    pub const ROLES: [&'static str; 10] = [
+        "background",
+        "surface",
+        "surface_border",
+        "selection",
+        "selection_border",
+        "glyph_surface",
+        "primary",
+        "secondary",
+        "accent",
+        "danger",
+    ];
+
+    fn get(&self, role: &str) -> Option<u32> {
+        Some(match role {
+            "background" => self.background,
+            "surface" => self.surface,
+            "surface_border" => self.surface_border,
+            "selection" => self.selection,
+            "selection_border" => self.selection_border,
+            "glyph_surface" => self.glyph_surface,
+            "primary" => self.primary,
+            "secondary" => self.secondary,
+            "accent" => self.accent,
+            "danger" => self.danger,
+            _ => return None,
+        })
+    }
+
+    /// Returns false for a role this palette does not have.
+    fn set(&mut self, role: &str, value: u32) -> bool {
+        match role {
+            "background" => self.background = value,
+            "surface" => self.surface = value,
+            "surface_border" => self.surface_border = value,
+            "selection" => self.selection = value,
+            "selection_border" => self.selection_border = value,
+            "glyph_surface" => self.glyph_surface = value,
+            "primary" => self.primary = value,
+            "secondary" => self.secondary = value,
+            "accent" => self.accent = value,
+            "danger" => self.danger = value,
+            _ => return false,
+        }
+        true
+    }
+
+    /// Whether this palette reads as a light scheme.
+    ///
+    /// Decided from the background's perceived brightness rather than from a
+    /// flag, so a custom palette is classified the same way a built-in is.
+    pub fn is_light(&self) -> bool {
+        let red = (self.background >> 16) & 0xff;
+        let green = (self.background >> 8) & 0xff;
+        let blue = self.background & 0xff;
+        // Rec. 601 luma, which tracks perceived brightness closely enough to
+        // pick a side.
+        (299 * red + 587 * green + 114 * blue) / 1000 > 127
+    }
+
+    /// Each role and its colour, for writing the file back.
+    pub fn entries(&self) -> [(&'static str, u32); 10] {
+        Self::ROLES.map(|role| (role, self.get(role).unwrap_or_default()))
+    }
+}
+
+/// Parse `#rrggbb`, `0xrrggbb`, or a bare `rrggbb`.
+fn parse_color(value: &str) -> Result<u32, String> {
+    let trimmed = value.trim();
+    let digits = trimmed
+        .strip_prefix('#')
+        .or_else(|| trimmed.strip_prefix("0x"))
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("invalid colour: {trimmed}"));
+    }
+    u32::from_str_radix(digits, 16).map_err(|_| format!("invalid colour: {trimmed}"))
+}
+
+/// A named colour scheme.
+///
+/// The built-ins map each published scheme's own colours onto the ten roles
+/// above; where a scheme has no distinct colour for a role, the nearest one
+/// from the same scheme is used rather than a colour invented for it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Theme {
+    #[default]
+    Midnight,
+    TokyoNight,
+    CatppuccinMocha,
+    CatppuccinLatte,
+    Dracula,
+    Nord,
+    GruvboxDark,
+    SolarizedDark,
+    RosePine,
+    Everforest,
+    OneDark,
+    /// Whatever the `color_*` keys define. Only reachable from the file.
+    Custom,
+}
+
+impl Theme {
+    /// The themes the settings panel cycles through. `Custom` is absent: it
+    /// only exists when the file defines it, and is appended at that point.
+    pub const BUILT_IN: [Self; 11] = [
+        Self::Midnight,
+        Self::TokyoNight,
+        Self::CatppuccinMocha,
+        Self::CatppuccinLatte,
+        Self::Dracula,
+        Self::Nord,
+        Self::GruvboxDark,
+        Self::SolarizedDark,
+        Self::RosePine,
+        Self::Everforest,
+        Self::OneDark,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Midnight => "midnight",
+            Self::TokyoNight => "tokyo-night",
+            Self::CatppuccinMocha => "catppuccin-mocha",
+            Self::CatppuccinLatte => "catppuccin-latte",
+            Self::Dracula => "dracula",
+            Self::Nord => "nord",
+            Self::GruvboxDark => "gruvbox-dark",
+            Self::SolarizedDark => "solarized-dark",
+            Self::RosePine => "rose-pine",
+            Self::Everforest => "everforest",
+            Self::OneDark => "one-dark",
+            Self::Custom => "custom",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        let wanted = value.trim().to_ascii_lowercase().replace([' ', '_'], "-");
+        Self::BUILT_IN
+            .iter()
+            .chain(std::iter::once(&Self::Custom))
+            .find(|theme| theme.id() == wanted)
+            .copied()
+            .ok_or_else(|| format!("unknown theme: {value}"))
+    }
+
+    /// The colours this theme paints with. `Custom` has none of its own; the
+    /// configuration supplies them.
+    pub fn palette(self) -> Palette {
+        let (
+            background,
+            surface,
+            surface_border,
+            selection,
+            selection_border,
+            glyph_surface,
+            primary,
+            secondary,
+            accent,
+            danger,
+        ) = match self {
+            Self::Midnight | Self::Custom => (
+                0x101217, 0x1b1e25, 0x30343e, 0x2b3140, 0x59647c, 0x181b21, 0xf4f6fb, 0x9ba3b4,
+                0x9b8cff, 0xff716c,
+            ),
+            Self::TokyoNight => (
+                0x16161e, 0x1a1b26, 0x3b4261, 0x292e42, 0x545c7e, 0x16161e, 0xc0caf5, 0x565f89,
+                0x7aa2f7, 0xf7768e,
+            ),
+            Self::CatppuccinMocha => (
+                0x11111b, 0x1e1e2e, 0x45475a, 0x313244, 0x585b70, 0x181825, 0xcdd6f4, 0xa6adc8,
+                0xcba6f7, 0xf38ba8,
+            ),
+            Self::CatppuccinLatte => (
+                0xdce0e8, 0xeff1f5, 0xbcc0cc, 0xccd0da, 0xacb0be, 0xe6e9ef, 0x4c4f69, 0x6c6f85,
+                0x8839ef, 0xd20f39,
+            ),
+            Self::Dracula => (
+                0x21222c, 0x282a36, 0x44475a, 0x44475a, 0x6272a4, 0x21222c, 0xf8f8f2, 0x6272a4,
+                0xbd93f9, 0xff5555,
+            ),
+            Self::Nord => (
+                0x2e3440, 0x3b4252, 0x4c566a, 0x434c5e, 0x5e81ac, 0x2e3440, 0xeceff4, 0x616e88,
+                0x88c0d0, 0xbf616a,
+            ),
+            Self::GruvboxDark => (
+                0x1d2021, 0x282828, 0x504945, 0x3c3836, 0x665c54, 0x1d2021, 0xebdbb2, 0xa89984,
+                0xfabd2f, 0xfb4934,
+            ),
+            Self::SolarizedDark => (
+                0x002b36, 0x073642, 0x586e75, 0x0a4a5a, 0x268bd2, 0x002b36, 0x93a1a1, 0x657b83,
+                0x268bd2, 0xdc322f,
+            ),
+            Self::RosePine => (
+                0x191724, 0x1f1d2e, 0x403d52, 0x26233a, 0x524f67, 0x191724, 0xe0def4, 0x908caa,
+                0xc4a7e7, 0xeb6f92,
+            ),
+            Self::Everforest => (
+                0x272e33, 0x2d353b, 0x475258, 0x3d484d, 0x4f585e, 0x272e33, 0xd3c6aa, 0x9da9a0,
+                0xa7c080, 0xe67e80,
+            ),
+            Self::OneDark => (
+                0x21252b, 0x282c34, 0x3e4451, 0x2c313c, 0x4b5263, 0x21252b, 0xabb2bf, 0x5c6370,
+                0xc678dd, 0xe06c75,
+            ),
+        };
+        Palette {
+            background,
+            surface,
+            surface_border,
+            selection,
+            selection_border,
+            glyph_surface,
+            primary,
+            secondary,
+            accent,
+            danger,
+        }
+    }
+}
+
+impl fmt::Display for Theme {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Midnight => "Midnight",
+            Self::TokyoNight => "Tokyo Night",
+            Self::CatppuccinMocha => "Catppuccin Mocha",
+            Self::CatppuccinLatte => "Catppuccin Latte",
+            Self::Dracula => "Dracula",
+            Self::Nord => "Nord",
+            Self::GruvboxDark => "Gruvbox Dark",
+            Self::SolarizedDark => "Solarized Dark",
+            Self::RosePine => "Rosé Pine",
+            Self::Everforest => "Everforest",
+            Self::OneDark => "One Dark",
+            Self::Custom => "Custom",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Config {
     pub hotkey: Hotkey,
@@ -598,6 +867,10 @@ pub struct Config {
     pub details: DetailMode,
     pub emoji_font: EmojiFont,
     pub skin_tone: SkinTone,
+    pub theme: Theme,
+    /// Set only when the file defines `color_*` keys. Carried through so a
+    /// change made in the settings panel cannot drop it on the next write.
+    pub custom_palette: Option<Palette>,
 }
 
 impl Default for Config {
@@ -610,6 +883,8 @@ impl Default for Config {
             details: DetailMode::default(),
             emoji_font: EmojiFont::default(),
             skin_tone: SkinTone::default(),
+            theme: Theme::default(),
+            custom_palette: None,
         }
     }
 }
@@ -618,6 +893,35 @@ impl Config {
     /// The text scale as a multiplier, clamped to the supported range.
     pub fn scale(self) -> f32 {
         self.font_scale.clamp(MIN_FONT_SCALE, MAX_FONT_SCALE) as f32 / 100.0
+    }
+
+    /// The colours to paint with, resolving `Custom` against the file.
+    pub fn palette(self) -> Palette {
+        match (self.theme, self.custom_palette) {
+            (Theme::Custom, Some(palette)) => palette,
+            (theme, _) => theme.palette(),
+        }
+    }
+
+    /// The themes the settings row steps through, which includes `Custom`
+    /// only when the file defined one.
+    pub fn themes(self) -> Vec<Theme> {
+        let mut themes = Theme::BUILT_IN.to_vec();
+        if self.custom_palette.is_some() {
+            themes.push(Theme::Custom);
+        }
+        themes
+    }
+
+    /// Step to the next theme, stopping at either end rather than wrapping,
+    /// which is how every other value row behaves.
+    pub fn next_theme(self, delta: isize) -> Theme {
+        let themes = self.themes();
+        let current = themes
+            .iter()
+            .position(|theme| *theme == self.theme)
+            .unwrap_or(0);
+        themes[current.saturating_add_signed(delta).min(themes.len() - 1)]
     }
 }
 
@@ -709,10 +1013,35 @@ fn parse_config(content: &str) -> Result<Config, String> {
             "details" => config.details = DetailMode::parse(value)?,
             "emoji_font" => config.emoji_font = EmojiFont::parse(value)?,
             "skin_tone" => config.skin_tone = SkinTone::parse(value)?,
+            "theme" | "palette" => config.theme = Theme::parse(value)?,
+            name if name
+                .strip_prefix("color_")
+                .is_some_and(|role| Palette::ROLES.contains(&role)) =>
+            {
+                let role = name.strip_prefix("color_").expect("checked above");
+                // A partial set of overrides still needs the other roles
+                // filled, so the custom palette starts from the stock one
+                // rather than from nothing.
+                let palette = config
+                    .custom_palette
+                    .get_or_insert_with(|| Theme::Midnight.palette());
+                palette.set(role, parse_color(value)?);
+            }
             _ => {}
         }
     }
     config.dimensions = config.dimensions.clamped();
+    // Overrides on their own are the whole point of writing them, so they
+    // select themselves unless the file names a different theme.
+    if config.custom_palette.is_some() && config.theme == Theme::default() {
+        config.theme = Theme::Custom;
+    }
+    // A file asking for `custom` without defining anything has nothing to
+    // show; fall back rather than painting the stock colours under a name
+    // that claims otherwise.
+    if config.theme == Theme::Custom && config.custom_palette.is_none() {
+        config.theme = Theme::default();
+    }
     Ok(config)
 }
 
@@ -723,13 +1052,22 @@ pub fn save_config(config: Config) -> Result<(), String> {
         .ok_or_else(|| format!("invalid config path: {}", path.display()))?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    fs::write(&path, config_contents(config))
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
+/// The whole configuration file, as it is written back.
+///
+/// Everything the file can hold has to appear here: a write replaces the file
+/// outright, so anything omitted is deleted the next time a setting changes.
+fn config_contents(config: Config) -> String {
     let dimensions = config.dimensions.clamped();
     let keys = Action::ALL
         .iter()
         .map(|action| format!("key_{} = \"{}\"\n", action.id(), config.keys.get(*action)))
         .collect::<String>();
     let content = format!(
-        "hotkey = \"{}\"\nwidth = {}\nheight = {}\nfont_scale = {}\ndetails = \"{}\"\nemoji_font = \"{}\"\nskin_tone = \"{}\"\n",
+        "hotkey = \"{}\"\nwidth = {}\nheight = {}\nfont_scale = {}\ndetails = \"{}\"\nemoji_font = \"{}\"\nskin_tone = \"{}\"\ntheme = \"{}\"\n",
         config.hotkey,
         dimensions.width,
         dimensions.height,
@@ -737,10 +1075,21 @@ pub fn save_config(config: Config) -> Result<(), String> {
         config.details.to_string().to_ascii_lowercase(),
         config.emoji_font,
         config.skin_tone.to_string().to_ascii_lowercase(),
+        config.theme.id(),
     );
-    let content = content + &keys;
-    fs::write(&path, content)
-        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+    // The panel cannot edit a custom palette, so writing it back is what
+    // stops an unrelated settings change from deleting it.
+    let colors = config
+        .custom_palette
+        .map(|palette| {
+            palette
+                .entries()
+                .iter()
+                .map(|(role, value)| format!("color_{role} = \"#{value:06x}\"\n"))
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    content + &colors + &keys
 }
 
 /// One glyph the user has picked, with how often. The list is ordered most
@@ -825,6 +1174,145 @@ fn write_recents(path: &Path, recents: &[RecentGlyph]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_colours_in_every_accepted_form() {
+        assert_eq!(parse_color("#1a1b26").unwrap(), 0x1a1b26);
+        assert_eq!(parse_color("0x1a1b26").unwrap(), 0x1a1b26);
+        assert_eq!(parse_color("1A1B26").unwrap(), 0x1a1b26);
+        assert_eq!(parse_color("  #1a1b26  ").unwrap(), 0x1a1b26);
+        for bad in ["#1a1b2", "#1a1b268", "wisteria", "#gggggg", ""] {
+            assert!(parse_color(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn named_themes_round_trip_through_their_ids() {
+        for theme in Theme::BUILT_IN {
+            let parsed = parse_config(&format!("theme = \"{}\"", theme.id())).unwrap();
+            assert_eq!(parsed.theme, theme);
+        }
+        assert!(parse_config("theme = \"chartreuse\"").is_err());
+    }
+
+    #[test]
+    fn every_theme_defines_every_role() {
+        for theme in Theme::BUILT_IN {
+            let palette = theme.palette();
+            // A role left at zero would paint black without saying so.
+            for (role, value) in palette.entries() {
+                assert!(
+                    palette.get(role).is_some(),
+                    "{} is missing {role}",
+                    theme.id()
+                );
+                assert_eq!(palette.get(role), Some(value));
+            }
+            // Text has to be distinguishable from what it sits on.
+            assert_ne!(palette.primary, palette.surface, "{}", theme.id());
+            assert_ne!(palette.primary, palette.background, "{}", theme.id());
+            assert_ne!(
+                palette.selection,
+                palette.selection_border,
+                "{}",
+                theme.id()
+            );
+        }
+    }
+
+    #[test]
+    fn colour_overrides_select_the_custom_theme() {
+        let parsed = parse_config("color_accent = \"#ff0000\"").unwrap();
+        assert_eq!(parsed.theme, Theme::Custom);
+        assert_eq!(parsed.palette().accent, 0xff0000);
+        // The roles left alone keep the stock colours rather than going black.
+        assert_eq!(parsed.palette().surface, Theme::Midnight.palette().surface);
+    }
+
+    #[test]
+    fn a_named_theme_wins_over_bare_overrides() {
+        let parsed = parse_config("theme = \"nord\"\ncolor_accent = \"#ff0000\"").unwrap();
+        assert_eq!(parsed.theme, Theme::Nord);
+        assert_eq!(parsed.palette(), Theme::Nord.palette());
+        // The override is still remembered, so selecting Custom finds it.
+        assert_eq!(parsed.custom_palette.unwrap().accent, 0xff0000);
+    }
+
+    #[test]
+    fn custom_without_any_colours_falls_back() {
+        let parsed = parse_config("theme = \"custom\"").unwrap();
+        assert_eq!(parsed.theme, Theme::default());
+        assert_eq!(parsed.palette(), Theme::default().palette());
+    }
+
+    #[test]
+    fn custom_colours_are_only_offered_once_defined() {
+        let stock = Config::default();
+        assert!(!stock.themes().contains(&Theme::Custom));
+        let custom = parse_config("color_primary = \"#ffffff\"").unwrap();
+        assert!(custom.themes().contains(&Theme::Custom));
+    }
+
+    #[test]
+    fn saving_preserves_a_custom_palette() {
+        let original = parse_config(concat!(
+            "theme = \"custom\"\n",
+            "color_background = \"#010203\"\n",
+            "color_accent = \"#0a0b0c\"\n",
+        ))
+        .unwrap();
+        assert_eq!(original.theme, Theme::Custom);
+
+        // A settings change rewrites the whole file, so the palette has to
+        // survive the round trip or the panel would quietly delete it.
+        let reloaded = parse_config(&config_contents(original)).unwrap();
+        assert_eq!(reloaded.theme, Theme::Custom);
+        assert_eq!(reloaded.custom_palette, original.custom_palette);
+        assert_eq!(reloaded.palette().background, 0x010203);
+        assert_eq!(reloaded.palette().accent, 0x0a0b0c);
+    }
+
+    #[test]
+    fn saving_round_trips_every_setting() {
+        let config = Config {
+            theme: Theme::RosePine,
+            skin_tone: SkinTone::Dark,
+            emoji_font: EmojiFont::SegoeSymbol,
+            details: DetailMode::Codepoint,
+            font_scale: 130,
+            ..Default::default()
+        };
+        let reloaded = parse_config(&config_contents(config)).unwrap();
+        assert_eq!(reloaded, config);
+    }
+
+    #[test]
+    fn light_and_dark_themes_are_told_apart() {
+        assert!(Theme::CatppuccinLatte.palette().is_light());
+        for theme in Theme::BUILT_IN {
+            if theme == Theme::CatppuccinLatte {
+                continue;
+            }
+            assert!(!theme.palette().is_light(), "{} reads as light", theme.id());
+        }
+    }
+
+    #[test]
+    fn theme_stepping_stops_at_both_ends() {
+        let first = Config {
+            theme: Theme::BUILT_IN[0],
+            ..Default::default()
+        };
+        assert_eq!(first.next_theme(-1), Theme::BUILT_IN[0]);
+        assert_eq!(first.next_theme(1), Theme::BUILT_IN[1]);
+
+        let last_theme = *Theme::BUILT_IN.last().unwrap();
+        let last = Config {
+            theme: last_theme,
+            ..Default::default()
+        };
+        assert_eq!(last.next_theme(1), last_theme);
+    }
 
     #[test]
     fn parses_default_hotkey() {

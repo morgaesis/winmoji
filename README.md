@@ -78,6 +78,7 @@ font_scale = 100
 details = "both"
 emoji_font = "Segoe UI Emoji"
 skin_tone = "default"
+theme = "midnight"
 ```
 
 | Key | Accepts | Default |
@@ -89,6 +90,8 @@ skin_tone = "default"
 | `details` | `none`, `type`, `codepoint`, `both` | `both` |
 | `emoji_font` | `Segoe UI Emoji`, `Segoe UI Symbol` | `Segoe UI Emoji` |
 | `skin_tone` | `default`, `light`, `medium-light`, `medium`, `medium-dark`, `dark` | `default` |
+| `theme` | A theme name, see below | `midnight` |
+| `color_<role>` | `#rrggbb`, one line per role | The stock colours |
 | `key_<action>` | A chord, one line per rebound action | The table above |
 
 `width` and `height` are clamped to the active monitor work area. Each `key_<action>` line takes the same form as `hotkey`, except that these may be bare keys.
@@ -96,6 +99,38 @@ skin_tone = "default"
 A chord combines any of the modifiers `Ctrl`, `Alt`, `Shift`, and `Win` with one key: a letter, a digit, `F1` through `F24`, `Space`, `Enter`, `Tab`, `Escape`, the arrows, `Page Up`, `Page Down`, `Home`, `End`, `Insert`, `Delete`, `Backspace`, or punctuation. Punctuation accepts its literal form or a name: `period`, `comma`, `slash`, `backslash`, `semicolon`, `apostrophe`, `minus`, `equals`, `left bracket`, `right bracket`, `grave`. The global `hotkey` always uses `MOD_NOREPEAT`.
 
 The responsive popup uses Direct2D and DirectWrite, with continuous width and height controls, Segoe UI Emoji colour glyphs or monochrome Segoe UI Symbol glyphs, and a clickable control for every search, browse, insert, and settings action.
+
+### Themes
+
+The Theme settings row steps through the built-in schemes and recolours the picker as it goes, including the window border. Set one in the configuration file with its name:
+
+| Theme | Name |
+| --- | --- |
+| Midnight | `midnight` |
+| Tokyo Night | `tokyo-night` |
+| Catppuccin Mocha | `catppuccin-mocha` |
+| Catppuccin Latte (light) | `catppuccin-latte` |
+| Dracula | `dracula` |
+| Nord | `nord` |
+| Gruvbox Dark | `gruvbox-dark` |
+| Solarized Dark | `solarized-dark` |
+| Rosé Pine | `rose-pine` |
+| Everforest | `everforest` |
+| One Dark | `one-dark` |
+
+Each maps its own published colours onto WinMoji's ten roles; where a scheme has no distinct colour for a role, the nearest one from that same scheme is used.
+
+A custom palette is defined in the configuration file and nowhere else. Any `color_<role>` line creates one and selects it, so a single override is enough:
+
+```toml
+color_accent = "#ff9e64"
+```
+
+Roles left out keep their stock colour. The ten are `background`, `surface`, `surface_border`, `selection`, `selection_border`, `glyph_surface`, `primary`, `secondary`, `accent`, and `danger`. Values accept `#rrggbb`, `0xrrggbb`, or bare `rrggbb`.
+
+Naming a theme alongside overrides keeps that theme active and holds the custom palette in reserve, so the settings row can reach it as a twelfth entry named Custom. The settings panel never edits these colours, and both saving and Reset preserve them.
+
+Whether a palette counts as light is read from its background brightness, which is what decides the title-bar mode, so a custom light palette gets a light frame without declaring it.
 
 ## Start with Windows
 

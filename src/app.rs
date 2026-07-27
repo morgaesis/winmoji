@@ -122,7 +122,7 @@ use crate::config::{
     Action, Binding, Config, DetailMode, EmojiFont, FONT_SCALE_STEP, Hotkey, Keybinds,
     MAX_FONT_SCALE, MAX_PICKER_HEIGHT, MAX_PICKER_WIDTH, MIN_FONT_SCALE, MIN_PICKER_HEIGHT,
     MIN_PICKER_WIDTH, MOD_ALT_VALUE, MOD_CONTROL_VALUE, MOD_NOREPEAT_VALUE, MOD_SHIFT_VALUE,
-    MOD_WIN_VALUE, PickerDimensions, RecentGlyph, SkinTone, load_config, load_recents,
+    MOD_WIN_VALUE, Palette, PickerDimensions, RecentGlyph, SkinTone, load_config, load_recents,
     remember_recent, save_config,
 };
 
@@ -458,7 +458,7 @@ fn slider_bounds(config: Config, index: usize) -> Option<(i32, i32, i32)> {
 }
 
 /// How many rows the settings view has.
-const SETTINGS_ROWS: usize = 8;
+const SETTINGS_ROWS: usize = 9;
 const SETTINGS_LIST_TOP: i32 = 42;
 const SETTINGS_ROW_HEIGHT: i32 = 38;
 /// Room kept below the last row for the hint line, which scrolls with the rows
@@ -468,7 +468,7 @@ const SETTINGS_HINT_HEIGHT: f32 = 30.0;
 /// Rows that run an action instead of holding a value. Arrow keys and a click
 /// both mean "do it", since there is nothing to step through.
 fn setting_is_action(index: usize) -> bool {
-    index >= 6
+    index >= 7
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1004,17 +1004,17 @@ struct Brushes {
     danger: ID2D1SolidColorBrush,
 }
 
-fn create_brushes(target: &ID2D1RenderTarget) -> Result<Brushes> {
+fn create_brushes(target: &ID2D1RenderTarget, palette: Palette) -> Result<Brushes> {
     Ok(Brushes {
-        surface: solid_brush(target, 0x1b1e25)?,
-        surface_border: solid_brush(target, 0x30343e)?,
-        selection: solid_brush(target, 0x2b3140)?,
-        selection_border: solid_brush(target, 0x59647c)?,
-        glyph_surface: solid_brush(target, 0x181b21)?,
-        primary: solid_brush(target, 0xf4f6fb)?,
-        secondary: solid_brush(target, 0x9ba3b4)?,
-        accent: solid_brush(target, 0x9b8cff)?,
-        danger: solid_brush(target, 0xff716c)?,
+        surface: solid_brush(target, palette.surface)?,
+        surface_border: solid_brush(target, palette.surface_border)?,
+        selection: solid_brush(target, palette.selection)?,
+        selection_border: solid_brush(target, palette.selection_border)?,
+        glyph_surface: solid_brush(target, palette.glyph_surface)?,
+        primary: solid_brush(target, palette.primary)?,
+        secondary: solid_brush(target, palette.secondary)?,
+        accent: solid_brush(target, palette.accent)?,
+        danger: solid_brush(target, palette.danger)?,
     })
 }
 
@@ -1681,6 +1681,17 @@ impl AppState {
         self.hovered_entry.or_else(|| self.selected_entry_index())
     }
 
+    /// Drop the device so the next frame rebuilds its brushes from the
+    /// current theme. The glyph atlas goes with it, which is affordable
+    /// because this only runs when the theme actually changes.
+    fn rebuild_theme(&mut self) {
+        self.render = None;
+        // The compositor keeps the frame it was last told about, so the
+        // border and title-bar mode need saying again.
+        configure_window_frame(self.hwnd, self.config.palette());
+        invalidate(self.hwnd);
+    }
+
     fn rebuild_formats(&mut self) -> Result<()> {
         self.formats = TextFormats::new(
             &self.dwrite_factory,
@@ -1731,6 +1742,7 @@ impl AppState {
                 format!("Hover details, {}", self.config.details),
                 format!("Emoji font, {}", self.config.emoji_font),
                 format!("Skin tone, {}", self.config.skin_tone),
+                format!("Theme, {}", self.config.theme),
                 format!("Keyboard shortcuts, {} actions", Action::ALL.len()),
                 format!("Open shortcut, {}", self.config.hotkey),
             ],
@@ -1946,7 +1958,7 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
                 return Err(error);
             }
         };
-        configure_window_frame(hwnd);
+        configure_window_frame(hwnd, config.palette());
 
         if let Err(error) = RegisterHotKey(
             Some(hwnd),
@@ -2044,10 +2056,16 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
     }
 }
 
-fn configure_window_frame(hwnd: HWND) {
-    let dark_mode = 1i32;
+/// Match the non-client frame to the theme.
+///
+/// The border and the title-bar mode are drawn by the compositor rather than
+/// by us, so a light palette inside a dark frame is the one place the theme
+/// would otherwise stop at the window edge.
+fn configure_window_frame(hwnd: HWND, palette: Palette) {
+    let dark_mode = i32::from(!palette.is_light());
     let corner_preference: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
-    let border_color = COLORREF(0x003e3430);
+    // COLORREF is 0x00BBGGRR, the reverse of the 0xRRGGBB the palette holds.
+    let border_color = COLORREF(swap_red_blue(palette.surface_border));
     unsafe {
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -2959,6 +2977,10 @@ fn adjust_setting(state: &mut AppState, delta: isize) {
         5 => {
             state.config.skin_tone = state.config.skin_tone.next(delta);
         }
+        6 => {
+            state.config.theme = state.config.next_theme(delta);
+            state.rebuild_theme();
+        }
         _ => {}
     }
     state.selected = state.settings_selected;
@@ -3000,10 +3022,22 @@ fn activate_setting(state: &mut AppState) {
             state.config.skin_tone = state.config.skin_tone.cycled();
         }
         6 => {
+            // Wrap to the first once the last is reached, as the other
+            // cycling rows do.
+            let themes = state.config.themes();
+            let last = themes.last().copied().unwrap_or_default();
+            state.config.theme = if state.config.theme == last {
+                themes.first().copied().unwrap_or_default()
+            } else {
+                state.config.next_theme(1)
+            };
+            state.rebuild_theme();
+        }
+        7 => {
             enter_shortcuts(state);
             return;
         }
-        7 => {
+        8 => {
             state.capturing_action = None;
             set_capturing_shortcut(state, true);
             state.status = Some("Press the new shortcut".to_string());
@@ -3046,15 +3080,23 @@ fn discard_settings(state: &mut AppState) {
     state.config = state.settings_original;
     state.display_dimensions = state.config.dimensions;
     let _ = state.rebuild_formats();
+    // The theme previews live, so stepping through and discarding has to put
+    // the original colours back too.
+    state.rebuild_theme();
     resize_window_in_place(state);
     enter_search(state);
 }
 
 fn reset_settings(state: &mut AppState) {
+    // A palette written in the file is not one of the panel's settings, so
+    // restoring stock values must not take it with them.
+    let custom_palette = state.config.custom_palette;
     state.config = Config::default();
+    state.config.custom_palette = custom_palette;
     state.display_dimensions = state.config.dimensions;
     state.status = None;
     let _ = state.rebuild_formats();
+    state.rebuild_theme();
     resize_window_in_place(state);
     state.sync_accessible_results();
     invalidate(state.hwnd);
@@ -4720,7 +4762,7 @@ fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> {
     }));
     attach_swapchain_target(&context, &swapchain, state.dpi)?;
     let target: ID2D1RenderTarget = context.cast()?;
-    let brushes = create_brushes(&target)?;
+    let brushes = create_brushes(&target, state.config.palette())?;
     let resources = RenderResources {
         target,
         context,
@@ -4996,7 +5038,7 @@ fn draw_shortcuts_picker(state: &mut AppState) -> Result<()> {
     let footer_top = state.footer_top() as f32;
     unsafe {
         target.BeginDraw();
-        target.Clear(Some(&color(0x101217)));
+        target.Clear(Some(&color(state.config.palette().background)));
         target.stroke_rounded(
             &rounded_rect(0.5, 0.5, width as f32 - 0.5, height as f32 - 0.5, 11.0),
             &brushes.surface_border,
@@ -5140,7 +5182,7 @@ fn draw_search_picker(state: &mut AppState) -> Result<()> {
 
     unsafe {
         target.BeginDraw();
-        target.Clear(Some(&color(0x101217)));
+        target.Clear(Some(&color(state.config.palette().background)));
         target.stroke_rounded(
             &rounded_rect(0.5, 0.5, width as f32 - 0.5, height as f32 - 0.5, 11.0),
             &brushes.surface_border,
@@ -5797,7 +5839,7 @@ fn draw_settings_picker(state: &mut AppState) -> Result<()> {
 
     unsafe {
         target.BeginDraw();
-        target.Clear(Some(&color(0x101217)));
+        target.Clear(Some(&color(state.config.palette().background)));
         target.stroke_rounded(
             &rounded_rect(0.5, 0.5, width as f32 - 0.5, height as f32 - 0.5, 11.0),
             &border,
@@ -5832,6 +5874,7 @@ fn draw_settings_picker(state: &mut AppState) -> Result<()> {
             },
         ),
         ("Skin tone", state.config.skin_tone.to_string()),
+        ("Theme", state.config.theme.to_string()),
         (
             "Keyboard shortcuts",
             format!("{} actions", Action::ALL.len()),
@@ -6151,6 +6194,48 @@ fn draw_setting_value(
                     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
                 );
             }
+        }
+        // Theme: the palette itself, so schemes are told apart by colour
+        // rather than by remembering which name looks like what.
+        6 => {
+            let palette = state.config.palette();
+            let swatches = [
+                palette.surface,
+                palette.selection,
+                palette.primary,
+                palette.secondary,
+                palette.accent,
+                palette.danger,
+            ];
+            let step = 14.0f32;
+            let strip_width = step * swatches.len() as f32;
+            let mut left = inner.left;
+            for value in swatches {
+                let cell = rounded_rect(
+                    left + 1.0,
+                    inner.top + 7.0,
+                    left + step - 1.0,
+                    inner.bottom - 7.0,
+                    3.0,
+                );
+                if let Ok(brush) = solid_brush(target, value) {
+                    target.fill_rounded(&cell, &brush);
+                    target.stroke_rounded(&cell, selection_border, 0.8);
+                }
+                left += step;
+            }
+            target.draw_text(
+                value,
+                &state.formats.brand,
+                rect(
+                    inner.left + strip_width + 8.0,
+                    inner.top,
+                    inner.right,
+                    inner.bottom,
+                ),
+                secondary,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            );
         }
         _ => {
             target.draw_text(
@@ -6533,6 +6618,11 @@ fn draw_entry_information(
 
 fn solid_brush(target: &ID2D1RenderTarget, value: u32) -> Result<ID2D1SolidColorBrush> {
     unsafe { target.CreateSolidColorBrush(&color(value), None) }
+}
+
+/// Reorder `0xRRGGBB` into the `0x00BBGGRR` that COLORREF expects.
+fn swap_red_blue(value: u32) -> u32 {
+    ((value & 0xff) << 16) | (value & 0xff00) | ((value >> 16) & 0xff)
 }
 
 fn color(value: u32) -> D2D1_COLOR_F {
@@ -7220,6 +7310,19 @@ fn io_error(error: std::io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colorref_reverses_the_channel_order() {
+        // 0xRRGGBB in, 0x00BBGGRR out.
+        assert_eq!(swap_red_blue(0x123456), 0x563412);
+        assert_eq!(swap_red_blue(0xff0000), 0x0000ff);
+        assert_eq!(swap_red_blue(0x0000ff), 0xff0000);
+        assert_eq!(swap_red_blue(0x00ff00), 0x00ff00);
+        // Reversing twice is the identity, so no channel is lost.
+        for value in [0x3e3430, 0x1b1e25, 0xf4f6fb] {
+            assert_eq!(swap_red_blue(swap_red_blue(value)), value);
+        }
+    }
 
     #[test]
     fn maps_utf16_positions_back_to_byte_offsets() {
