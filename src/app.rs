@@ -53,8 +53,8 @@ use windows::Win32::Graphics::Dxgi::{
     IDXGIFactory2, IDXGISurface, IDXGISwapChain2,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint, PAINTSTRUCT, ScreenToClient,
+    BeginPaint, ClientToScreen, EndPaint, GetMonitorInfoW, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, ScreenToClient,
 };
 use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -122,8 +122,8 @@ use crate::config::{
     Action, Binding, Config, DetailMode, EmojiFont, FONT_SCALE_STEP, Hotkey, Keybinds,
     MAX_FONT_SCALE, MAX_PICKER_HEIGHT, MAX_PICKER_WIDTH, MIN_FONT_SCALE, MIN_PICKER_HEIGHT,
     MIN_PICKER_WIDTH, MOD_ALT_VALUE, MOD_CONTROL_VALUE, MOD_NOREPEAT_VALUE, MOD_SHIFT_VALUE,
-    MOD_WIN_VALUE, Palette, PickerDimensions, RecentGlyph, SkinTone, load_config, load_recents,
-    remember_recent, save_config,
+    MOD_WIN_VALUE, Palette, PickerDimensions, RecentGlyph, SkinTone, SpawnPosition, load_config,
+    load_recents, remember_recent, save_config,
 };
 
 const CLASS_NAME: PCWSTR = w!("WinMojiPickerWindow");
@@ -458,7 +458,7 @@ fn slider_bounds(config: Config, index: usize) -> Option<(i32, i32, i32)> {
 }
 
 /// How many rows the settings view has.
-const SETTINGS_ROWS: usize = 9;
+const SETTINGS_ROWS: usize = 10;
 const SETTINGS_LIST_TOP: i32 = 42;
 const SETTINGS_ROW_HEIGHT: i32 = 38;
 /// Room kept below the last row for the hint line, which scrolls with the rows
@@ -468,7 +468,7 @@ const SETTINGS_HINT_HEIGHT: f32 = 30.0;
 /// Rows that run an action instead of holding a value. Arrow keys and a click
 /// both mean "do it", since there is nothing to step through.
 fn setting_is_action(index: usize) -> bool {
-    index >= 7
+    index >= 8
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -476,13 +476,18 @@ enum HitTarget {
     Close,
     Settings,
     Browse,
+    /// Empty header space, which drags the window.
+    TitleBar,
     SearchClear,
     SearchField,
     Category(usize),
     CategoryScrollLeft,
     CategoryScrollRight,
     SearchResult(usize),
-    BrowseItem { section: usize, item: usize },
+    BrowseItem {
+        section: usize,
+        item: usize,
+    },
     Scrollbar,
     Copy,
     Insert,
@@ -868,6 +873,8 @@ struct AppState {
     dragging_resize: Option<(i32, i32)>,
     /// A click in the search field is held so the drag can extend a selection.
     dragging_search: bool,
+    /// Offset from the window origin to the pointer while dragging the frame.
+    dragging_move: Option<(i32, i32)>,
     capturing_shortcut: bool,
     keyboard_state: [u8; 256],
     pending_commit: Option<bool>,
@@ -1076,6 +1083,7 @@ impl AppState {
             dragging_scrollbar: None,
             dragging_resize: None,
             dragging_search: false,
+            dragging_move: None,
             capturing_shortcut: false,
             keyboard_state: [0; 256],
             pending_commit: None,
@@ -1743,6 +1751,7 @@ impl AppState {
                 format!("Emoji font, {}", self.config.emoji_font),
                 format!("Skin tone, {}", self.config.skin_tone),
                 format!("Theme, {}", self.config.theme),
+                format!("Opens at, {}", self.config.position),
                 format!("Keyboard shortcuts, {} actions", Action::ALL.len()),
                 format!("Open shortcut, {}", self.config.hotkey),
             ],
@@ -2236,6 +2245,8 @@ fn is_window_visible(hwnd: HWND) -> bool {
 
 /// The DPI `hwnd` renders at, never below the 96 baseline.
 ///
+/// The DPI `hwnd` renders at, never below the 96 baseline.
+///
 /// `GetDpiForWindow` reports 0 for a handle it does not recognise, which would
 /// scale the whole layout to nothing; the floor is part of the contract here.
 fn window_dpi(hwnd: HWND) -> u32 {
@@ -2468,7 +2479,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSEMOVE => {
             let (x, y) = mouse_point_dip(lparam, state.dpi);
-            if state.dragging_search {
+            if state.dragging_move.is_some() {
+                update_dragged_move(state);
+            } else if state.dragging_search {
                 if let Ok(caret) = search_caret_at(state, x)
                     && caret != state.search.caret
                 {
@@ -2510,7 +2523,8 @@ unsafe extern "system" fn window_proc(
             let was_dragging = state.dragging_slider.is_some()
                 || was_dragging_scrollbar
                 || state.dragging_resize.is_some()
-                || state.dragging_search;
+                || state.dragging_search
+                || state.dragging_move.is_some();
             if state.dragging_slider.take().is_some() {
                 resize_window_in_place(state);
             }
@@ -2520,6 +2534,14 @@ unsafe extern "system" fn window_proc(
             }
             state.dragging_scrollbar = None;
             state.dragging_search = false;
+            if state.dragging_move.take().is_some()
+                && let Ok(window) = window_rect(state.hwnd)
+            {
+                // Recorded whatever the position mode is, so switching to
+                // `remember` later has somewhere to go.
+                state.config.last_position = Some((window.left, window.top));
+                let _ = save_config(state.config);
+            }
             if was_dragging {
                 unsafe {
                     ReleaseCapture().ok();
@@ -2981,6 +3003,7 @@ fn adjust_setting(state: &mut AppState, delta: isize) {
             state.config.theme = state.config.next_theme(delta);
             state.rebuild_theme();
         }
+        7 => state.config.position = state.config.position.next(delta),
         _ => {}
     }
     state.selected = state.settings_selected;
@@ -3033,11 +3056,12 @@ fn activate_setting(state: &mut AppState) {
             };
             state.rebuild_theme();
         }
-        7 => {
+        7 => state.config.position = state.config.position.cycled(),
+        8 => {
             enter_shortcuts(state);
             return;
         }
-        8 => {
+        9 => {
             state.capturing_action = None;
             set_capturing_shortcut(state, true);
             state.status = Some("Press the new shortcut".to_string());
@@ -3707,8 +3731,33 @@ fn restore_picker(state: &mut AppState) {
     }
 }
 
+/// The point the picker opens beside, and whether it should be nudged clear
+/// of that point rather than placed exactly on it.
+///
+/// Only the anchored modes want the offset: a remembered position is where
+/// the window was actually left, and centring has nothing to avoid covering.
+fn spawn_anchor(state: &AppState) -> (POINT, bool) {
+    let pointer = cursor_position().unwrap_or_default();
+    match state.config.position {
+        SpawnPosition::Pointer => (pointer, true),
+        SpawnPosition::Caret => (caret_screen_position(state.target).unwrap_or(pointer), true),
+        SpawnPosition::Center => (pointer, false),
+        // The remembered point is the anchor, so the monitor is chosen from
+        // where the picker is going rather than from where the pointer
+        // happens to be: the two are often different displays.
+        SpawnPosition::Remember => (
+            state
+                .config
+                .last_position
+                .map(|(x, y)| POINT { x, y })
+                .unwrap_or(pointer),
+            false,
+        ),
+    }
+}
+
 fn position_near_cursor(state: &mut AppState) {
-    let cursor = cursor_position().unwrap_or_default();
+    let (cursor, offset_from_anchor) = spawn_anchor(state);
     let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
     let mut monitor_info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
@@ -3736,16 +3785,30 @@ fn position_near_cursor(state: &mut AppState) {
     state.dpi = dpi_x;
     let width = scale(base_width, dpi_x);
     let height = scale(base_height, dpi_y);
-    let mut x = cursor.x + scale(14, dpi_x);
-    let mut y = cursor.y + scale(14, dpi_y);
-    if x + width > monitor_info.rcWork.right {
-        x = cursor.x - width - scale(14, dpi_x);
+    let work = monitor_info.rcWork;
+    let (mut x, mut y) = match state.config.position {
+        SpawnPosition::Center => (
+            work.left + ((work.right - work.left) - width) / 2,
+            work.top + ((work.bottom - work.top) - height) / 2,
+        ),
+        // The anchor already is the remembered point; the clamp below keeps
+        // it on screen if that display has since gone away.
+        SpawnPosition::Remember | SpawnPosition::Caret | SpawnPosition::Pointer => {
+            (cursor.x, cursor.y)
+        }
+    };
+    if offset_from_anchor {
+        x += scale(14, dpi_x);
+        y += scale(14, dpi_y);
+        if x + width > work.right {
+            x = cursor.x - width - scale(14, dpi_x);
+        }
+        if y + height > work.bottom {
+            y = cursor.y - height - scale(14, dpi_y);
+        }
     }
-    if y + height > monitor_info.rcWork.bottom {
-        y = cursor.y - height - scale(14, dpi_y);
-    }
-    x = x.max(monitor_info.rcWork.left);
-    y = y.max(monitor_info.rcWork.top);
+    x = x.min(work.right - width).max(work.left);
+    y = y.min(work.bottom - height).max(work.top);
     unsafe {
         SetWindowPos(
             state.hwnd,
@@ -4279,6 +4342,13 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
     if contains(header_button_rect(width, 0), x, y) {
         return Some(HitTarget::Close);
     }
+    // Empty header space is the grab handle. Every button slot is tested,
+    // including any the current view does not draw, so a view without one
+    // falls through to the checks below exactly as it did before.
+    if y < SEARCH_TOP as f32 && !(0..3).any(|slot| contains(header_button_rect(width, slot), x, y))
+    {
+        return Some(HitTarget::TitleBar);
+    }
     if state.view == View::Shortcuts {
         if list_scrollbar_rects(state).is_some_and(|(track, _)| contains(track, x, y)) {
             return Some(HitTarget::Scrollbar);
@@ -4433,6 +4503,31 @@ fn update_hover(state: &mut AppState, x: f32, y: f32) {
 /// Resize the window to follow the cursor while the corner grip is dragged.
 /// The picker draws its own frame, so sizing is done here rather than by
 /// handing the system a resize border it would draw over.
+/// Follow the pointer while the frame is being dragged.
+///
+/// The size is left alone: only the origin moves, and it is not clamped to
+/// the work area, so the picker can be dragged onto another monitor.
+fn update_dragged_move(state: &mut AppState) {
+    let Some((offset_x, offset_y)) = state.dragging_move else {
+        return;
+    };
+    let Ok(cursor) = cursor_position() else {
+        return;
+    };
+    unsafe {
+        SetWindowPos(
+            state.hwnd,
+            None,
+            cursor.x - offset_x,
+            cursor.y - offset_y,
+            0,
+            0,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE,
+        )
+        .ok();
+    }
+}
+
 fn update_dragged_resize(state: &mut AppState) {
     let Some((offset_x, offset_y)) = state.dragging_resize else {
         return;
@@ -4536,6 +4631,14 @@ fn handle_click(state: &mut AppState, x: f32, y: f32) {
         HitTarget::Close => hide_picker(state),
         HitTarget::Settings => enter_settings(state),
         HitTarget::Browse => focus_browser(state),
+        HitTarget::TitleBar => {
+            if let (Ok(cursor), Ok(window)) = (cursor_position(), window_rect(state.hwnd)) {
+                state.dragging_move = Some((cursor.x - window.left, cursor.y - window.top));
+                unsafe {
+                    let _ = SetCapture(state.hwnd);
+                }
+            }
+        }
         HitTarget::SearchClear => {
             state.search.clear();
             state.update_results();
@@ -4675,11 +4778,6 @@ fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> {
     if let Some(resources) = &state.render {
         return Ok(resources.clone());
     }
-    // Take the scale from the window rather than from whatever was recorded
-    // last. The device is often built before the picker has ever been shown,
-    // and the show path is not the only way here, so a stale 96 would leave
-    // the layout drawn at logical size inside a physically larger frame.
-    state.dpi = window_dpi(state.hwnd);
     let client = client_rect(state.hwnd)?;
 
     let mut device: Option<ID3D11Device> = None;
@@ -5875,6 +5973,7 @@ fn draw_settings_picker(state: &mut AppState) -> Result<()> {
         ),
         ("Skin tone", state.config.skin_tone.to_string()),
         ("Theme", state.config.theme.to_string()),
+        ("Opens at", state.config.position.to_string()),
         (
             "Keyboard shortcuts",
             format!("{} actions", Action::ALL.len()),
@@ -6769,6 +6868,47 @@ fn focused_child_for(target: HWND) -> HWND {
     } else {
         HWND::default()
     }
+}
+
+/// The bottom-left of the text caret in `target`, in screen coordinates.
+///
+/// Reports `None` when the focused control publishes no caret, which is the
+/// common case outside plain Win32 edit controls: browsers, Electron and most
+/// UWP applications draw their own and tell the system nothing.
+fn caret_screen_position(target: HWND) -> Option<POINT> {
+    if target.is_invalid() || !is_window(target) {
+        return None;
+    }
+    let thread = window_thread(target);
+    if thread == 0 {
+        return None;
+    }
+    let mut information = GUITHREADINFO {
+        cbSize: size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetGUIThreadInfo(thread, &mut information) }.ok()?;
+    let caret = information.rcCaret;
+    // A collapsed rectangle means no caret rather than one of zero height.
+    if caret.right <= caret.left && caret.bottom <= caret.top {
+        return None;
+    }
+    let owner = if information.hwndCaret.is_invalid() {
+        information.hwndFocus
+    } else {
+        information.hwndCaret
+    };
+    if owner.is_invalid() || !is_window(owner) {
+        return None;
+    }
+    let mut point = POINT {
+        x: caret.left,
+        y: caret.bottom,
+    };
+    if !unsafe { ClientToScreen(owner, &mut point) }.as_bool() {
+        return None;
+    }
+    Some(point)
 }
 
 fn valid_target_focus(target: HWND, focus: HWND) -> bool {

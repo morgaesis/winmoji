@@ -858,6 +858,68 @@ impl fmt::Display for Theme {
     }
 }
 
+/// Where the picker appears when it opens.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SpawnPosition {
+    /// At the text insertion point of the focused control, which is where the
+    /// built-in Windows emoji panel appears. Falls back to the pointer when
+    /// the control reports no caret, which many applications do not.
+    #[default]
+    Caret,
+    /// At the mouse pointer.
+    Pointer,
+    /// Centred on the monitor holding the pointer.
+    Center,
+    /// Wherever it was last moved to.
+    Remember,
+}
+
+impl SpawnPosition {
+    pub const ALL: [Self; 4] = [Self::Caret, Self::Pointer, Self::Center, Self::Remember];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Caret => "caret",
+            Self::Pointer => "pointer",
+            Self::Center => "center",
+            Self::Remember => "remember",
+        }
+    }
+
+    pub fn next(self, delta: isize) -> Self {
+        let current = Self::ALL.iter().position(|v| *v == self).unwrap_or(0);
+        Self::ALL[current
+            .saturating_add_signed(delta)
+            .min(Self::ALL.len() - 1)]
+    }
+
+    pub fn cycled(self) -> Self {
+        let current = Self::ALL.iter().position(|v| *v == self).unwrap_or(0);
+        Self::ALL[(current + 1) % Self::ALL.len()]
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "caret" | "text" | "insertion" => Ok(Self::Caret),
+            "pointer" | "cursor" | "mouse" => Ok(Self::Pointer),
+            "center" | "centre" | "monitor" => Ok(Self::Center),
+            "remember" | "last" | "fixed" => Ok(Self::Remember),
+            other => Err(format!("unsupported picker position: {other}")),
+        }
+    }
+}
+
+impl fmt::Display for SpawnPosition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Caret => "Text caret",
+            Self::Pointer => "Mouse pointer",
+            Self::Center => "Screen centre",
+            Self::Remember => "Last position",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Config {
     pub hotkey: Hotkey,
@@ -871,6 +933,10 @@ pub struct Config {
     /// Set only when the file defines `color_*` keys. Carried through so a
     /// change made in the settings panel cannot drop it on the next write.
     pub custom_palette: Option<Palette>,
+    pub position: SpawnPosition,
+    /// Where the window was last moved to, in screen coordinates. Recorded on
+    /// every drag so that selecting `remember` later has somewhere to go.
+    pub last_position: Option<(i32, i32)>,
 }
 
 impl Default for Config {
@@ -885,6 +951,8 @@ impl Default for Config {
             skin_tone: SkinTone::default(),
             theme: Theme::default(),
             custom_palette: None,
+            position: SpawnPosition::default(),
+            last_position: None,
         }
     }
 }
@@ -960,6 +1028,10 @@ pub fn load_hotkey() -> Result<Hotkey, String> {
 
 fn parse_config(content: &str) -> Result<Config, String> {
     let mut config = Config::default();
+    // Editors that default to UTF-8 with a signature, Notepad among them,
+    // put a byte-order mark before the first key. Left in place it becomes
+    // part of that key's name and the line is silently ignored.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     for raw_line in content.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -1014,6 +1086,18 @@ fn parse_config(content: &str) -> Result<Config, String> {
             "emoji_font" => config.emoji_font = EmojiFont::parse(value)?,
             "skin_tone" => config.skin_tone = SkinTone::parse(value)?,
             "theme" | "palette" => config.theme = Theme::parse(value)?,
+            "position" => config.position = SpawnPosition::parse(value)?,
+            "position_x" | "position_y" => {
+                let coordinate = value
+                    .parse::<i32>()
+                    .map_err(|_| format!("invalid picker position: {value}"))?;
+                let (x, y) = config.last_position.unwrap_or((0, 0));
+                config.last_position = Some(if key.trim() == "position_x" {
+                    (coordinate, y)
+                } else {
+                    (x, coordinate)
+                });
+            }
             name if name
                 .strip_prefix("color_")
                 .is_some_and(|role| Palette::ROLES.contains(&role)) =>
@@ -1077,6 +1161,23 @@ fn config_contents(config: Config) -> String {
         config.skin_tone.to_string().to_ascii_lowercase(),
         config.theme.id(),
     );
+    let content = content
+        + &format!(
+            "position = \"{}\"
+",
+            config.position.id()
+        );
+    let content = content
+        + &config
+            .last_position
+            .map(|(x, y)| {
+                format!(
+                    "position_x = {x}
+position_y = {y}
+"
+                )
+            })
+            .unwrap_or_default();
     // The panel cannot edit a custom palette, so writing it back is what
     // stops an unrelated settings change from deleting it.
     let colors = config
@@ -1294,6 +1395,53 @@ mod tests {
                 continue;
             }
             assert!(!theme.palette().is_light(), "{} reads as light", theme.id());
+        }
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_hide_the_first_key() {
+        let parsed = parse_config("\u{feff}theme = \"nord\"\nfont_scale = 120").unwrap();
+        assert_eq!(parsed.theme, Theme::Nord);
+        assert_eq!(parsed.font_scale, 120);
+    }
+
+    #[test]
+    fn parses_every_spawn_position_spelling() {
+        for (text, expected) in [
+            ("caret", SpawnPosition::Caret),
+            ("text", SpawnPosition::Caret),
+            ("pointer", SpawnPosition::Pointer),
+            ("cursor", SpawnPosition::Pointer),
+            ("mouse", SpawnPosition::Pointer),
+            ("center", SpawnPosition::Center),
+            ("centre", SpawnPosition::Center),
+            ("remember", SpawnPosition::Remember),
+            ("last", SpawnPosition::Remember),
+        ] {
+            let parsed = parse_config(&format!("position = \"{text}\"")).unwrap();
+            assert_eq!(parsed.position, expected, "{text}");
+        }
+        assert!(parse_config("position = \"sideways\"").is_err());
+    }
+
+    #[test]
+    fn a_dragged_position_survives_saving() {
+        let config = Config {
+            position: SpawnPosition::Remember,
+            last_position: Some((-1200, 340)),
+            ..Default::default()
+        };
+        let reloaded = parse_config(&config_contents(config)).unwrap();
+        assert_eq!(reloaded.position, SpawnPosition::Remember);
+        // Negative coordinates are ordinary on a monitor left of the primary.
+        assert_eq!(reloaded.last_position, Some((-1200, 340)));
+    }
+
+    #[test]
+    fn spawn_position_ids_round_trip() {
+        for position in SpawnPosition::ALL {
+            let parsed = parse_config(&format!("position = \"{}\"", position.id())).unwrap();
+            assert_eq!(parsed.position, position);
         }
     }
 

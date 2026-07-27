@@ -54,6 +54,8 @@ These are fixed, and edit the search field rather than the selection:
 
 Clicking in the search field puts the caret where you click, and dragging from there selects a range. `Left` and `Right` move the caret whenever a query is typed; with the field empty they move the grid selection instead, since there is no caret to carry.
 
+Drag the empty part of the header to move the picker, and the corner grip to resize it. A move is remembered, so the `remember` position mode below reopens it where you left it.
+
 The scrollbar takes a direct drag and its grip grows under the pointer. The mouse wheel browses smoothly, the category rail scrolls with a vertical or horizontal wheel gesture while hovering it, and category focus follows the visible section. PrintScreen and Win-key shortcuts pass through while the picker is open, so system screenshots keep working.
 
 ### Insertion behaviour
@@ -91,6 +93,8 @@ theme = "midnight"
 | `emoji_font` | `Segoe UI Emoji`, `Segoe UI Symbol` | `Segoe UI Emoji` |
 | `skin_tone` | `default`, `light`, `medium-light`, `medium`, `medium-dark`, `dark` | `default` |
 | `theme` | A theme name, see below | `midnight` |
+| `position` | `caret`, `pointer`, `center`, `remember` | `caret` |
+| `position_x`, `position_y` | Screen coordinates, written when you drag | Unset |
 | `color_<role>` | `#rrggbb`, one line per role | The stock colours |
 | `key_<action>` | A chord, one line per rebound action | The table above |
 
@@ -99,6 +103,19 @@ theme = "midnight"
 A chord combines any of the modifiers `Ctrl`, `Alt`, `Shift`, and `Win` with one key: a letter, a digit, `F1` through `F24`, `Space`, `Enter`, `Tab`, `Escape`, the arrows, `Page Up`, `Page Down`, `Home`, `End`, `Insert`, `Delete`, `Backspace`, or punctuation. Punctuation accepts its literal form or a name: `period`, `comma`, `slash`, `backslash`, `semicolon`, `apostrophe`, `minus`, `equals`, `left bracket`, `right bracket`, `grave`. The global `hotkey` always uses `MOD_NOREPEAT`.
 
 The responsive popup uses Direct2D and DirectWrite, with continuous width and height controls, Segoe UI Emoji colour glyphs or monochrome Segoe UI Symbol glyphs, and a clickable control for every search, browse, insert, and settings action.
+
+### Where it opens
+
+The Opens at settings row and the `position` key choose where the popup appears:
+
+| Value | Behaviour |
+| --- | --- |
+| `caret` | At the text insertion point, where the built-in Windows panel appears |
+| `pointer` | At the mouse pointer |
+| `center` | Centred on the monitor holding the pointer |
+| `remember` | Where it was last dragged to |
+
+`caret` is the default and falls back to the pointer when the focused control publishes no caret, which is common outside plain Win32 edit controls: browsers, Electron and most UWP applications draw their own and tell the system nothing. Dragging the window records its position under every mode, so switching to `remember` later has somewhere to go.
 
 ### Themes
 
