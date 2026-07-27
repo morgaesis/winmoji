@@ -2,42 +2,69 @@
 
 WinMoji is a fast keyboard-first Unicode picker for Windows. It stays resident, opens a small native popup, searches offline, and inserts the selected character without using the clipboard.
 
+![Searching the catalog and narrowing to a result](docs/winmoji-search.gif)
+
 The catalog contains the full Unicode 17 emoji set plus named Unicode symbols, arrows, math, currency, punctuation, Greek, shapes, common technical characters, and classic text emoticons. There are no GIFs, stickers, or network requests.
 
 ## Use
 
-Run `winmoji.exe` to show the picker. The default global shortcut is `Ctrl+Shift+.`. On Dvorak, this is the physical QWERTY `E` position.
+Run `winmoji.exe` to show the picker. The default global shortcut is `Ctrl+Shift+.`. The built-in Windows emoji panel answers to `Win+.` and `Win+;`, and the shell holds both registrations, so no application can take them; WinMoji sits next to it rather than replacing it. Change the shortcut in settings or the configuration file.
 
-- Type to search.
-- The search field shows a caret: Left, Right, Home, and End move it, Shift extends a selection, Ctrl+A selects everything, and Ctrl+V pastes text into the search.
-- Misspellings, transposed letters, and stray punctuation are matched automatically.
-- Empty search results are ordered by most recent use.
-- Results are ranked by how well they match and by what you have picked before, so choosing an entry for a query lifts it above rivals next time. The list scrolls, so matches below the fold stay reachable.
-- Press Ctrl+Backspace to delete the previous search word, or click the clear button to empty the field.
-- Press Up or Down, or Ctrl+J or Ctrl+K, to select a result.
-- Press Enter to insert the selected text and close the picker.
-- Press Shift+Enter to insert the selected text and keep the picker open.
-- Press Ctrl+C to copy the selected text to the clipboard and close, or Ctrl+Shift+C to copy and keep the picker open. Copying works where inserting cannot, such as into an elevated application.
-- The footer shows Copy and Insert beside a Shift cap. Holding Shift lights the cap and both buttons change to their keep-open form; clicking the cap holds that state without the key.
-- Press Ctrl+= or Ctrl+- to resize the text. Everything scales together, and the size is saved.
-- Clear the search or press Ctrl+G to browse the continuously scrolling catalog in the same window.
-- Emoji follow the Unicode CLDR groups for smileys, people, animals, food, travel, activities, objects, and flags. Symbols holds the CLDR emoji symbols, Characters holds the broad Unicode catalog of arrows, math, currency, punctuation and Greek, and Emoticons has its own group.
-- In the grid, use the arrow keys or Ctrl+H, Ctrl+J, Ctrl+K, and Ctrl+L to move, Ctrl+U and Ctrl+D to move the selection by half a page, Page Up and Page Down to scroll the view, the mouse wheel to browse smoothly, or click a category button to jump. The category rail scrolls with a vertical or horizontal wheel or trackpad gesture while hovering it, with its edge buttons, or by clicking.
-- Right-click an emoji that supports skin tones to pick a variant for a single insert. The permanent default tone is a settings row and applies to display and inserts everywhere.
-- Drag the scrollbar for direct continuous positioning; its grip grows under the pointer. Category focus follows the visible section while scrolling.
-- Grid rows are rendered on demand for the visible viewport, so large categories do not create work for offscreen emoji during scrolling.
-- Hover or focus a character to show its configured name, code point, and type in the footer.
-- Hover category icons and buttons for their labels and shortcuts, including the Enter and Shift+Enter insert hints.
-- Press Ctrl+, or click the settings button to configure the picker. The panel scrolls with the wheel, the scrollbar, Page Up and Page Down, or by moving the selection past an edge, so every row stays reachable at any window height.
-- The Keyboard shortcuts row opens its page with Enter, an arrow key, or a click. It lists every action and the chord that runs it; Enter or a click rebinds the focused one, and a chord another action already owns is refused rather than taken. Reset restores the stock chords and writes them straight away, as rebinding does. The arrow keys always move the selection and the search field always takes typing, so neither is rebindable.
-- Press Escape, click outside the picker, or switch to another window to close without inserting.
-- PrintScreen and Win-key shortcuts pass through while the picker is open, so system screenshots keep working.
+Type to search. Misspellings, transposed letters, and stray punctuation still match. Results are ranked by match quality and by what you have picked before, so choosing an entry for a query lifts it above rivals next time. An empty search lists the catalog by most recent use, and `Ctrl+G` browses it in the same window.
 
-WinMoji opens without activating its window. Search and navigation keys are captured while the original control remains focused, so transient fields such as inline rename editors stay open. WinMoji releases keyboard capture before inserting UTF-16 input into that exact control. It closes if another application becomes active. Windows UIPI blocks input into an elevated application when WinMoji is not elevated. Applications with custom controls can ignore `KEYEVENTF_UNICODE`; WinMoji cancels rather than sending text to a different window.
+Hover or focus a character to show its name, code point, and type in the footer. Right-click an emoji that supports skin tones to pick a variant for one insert; the permanent default is a settings row that applies everywhere.
 
-The responsive popup uses Direct2D and DirectWrite. Settings provide continuous width and height controls, Segoe UI Emoji color glyphs, or monochrome Segoe UI Symbol glyphs. Search, browse, insert, and settings actions have matching clickable controls, including a clear button in the search field.
+The footer carries Copy and Insert beside a Shift cap. Holding Shift lights the cap and both buttons switch to their keep-open form. Clicking the cap latches that state without the key, for as long as the picker is open.
+
+### Keyboard
+
+Every action below is rebindable from the Keyboard shortcuts page in settings.
+
+| Action | Chord |
+| --- | --- |
+| Insert | `Enter` |
+| Insert, keep open | `Shift+Enter` |
+| Copy | `Ctrl+C` |
+| Copy, keep open | `Ctrl+Shift+C` |
+| Close | `Escape` |
+| Settings | `Ctrl+,` |
+| Browse catalog | `Ctrl+G` |
+| Select up | `Ctrl+K` |
+| Select down | `Ctrl+J` |
+| Select left | `Ctrl+H` |
+| Select right | `Ctrl+L` |
+| Half page up | `Ctrl+U` |
+| Half page down | `Ctrl+D` |
+| Scroll page up | `Page Up` |
+| Scroll page down | `Page Down` |
+| Larger text | `Ctrl+=` |
+| Smaller text | `Ctrl+-` |
+
+The arrow keys and the search field are fixed, because they are the primitives the rest is shorthand for. For the same reason a bare letter or punctuation chord is refused: the field would swallow it before any action saw it. A chord another action already owns is refused rather than taken.
+
+These are fixed, and edit the search field rather than the selection:
+
+| Action | Chord |
+| --- | --- |
+| Move the caret | `Left`, `Right`, `Home`, `End` |
+| Extend a selection | `Shift` with any caret key |
+| Select everything | `Ctrl+A` |
+| Paste into the search | `Ctrl+V` |
+| Delete the previous word | `Ctrl+Backspace` |
+
+The scrollbar takes a direct drag and its grip grows under the pointer. The mouse wheel browses smoothly, the category rail scrolls with a vertical or horizontal wheel gesture while hovering it, and category focus follows the visible section. PrintScreen and Win-key shortcuts pass through while the picker is open, so system screenshots keep working.
+
+### Insertion behaviour
+
+WinMoji opens without activating its window. Search and navigation keys are captured while the original control remains focused, so transient fields such as inline rename editors stay open, and capture is released before UTF-16 input goes into that exact control. The picker closes if another application becomes active.
+
+Copying reaches the places insertion cannot. Windows UIPI blocks input into an elevated application when WinMoji is not elevated, and applications with custom controls can ignore `KEYEVENTF_UNICODE`; in that case WinMoji cancels rather than sending text to a different window.
 
 ## Configure
+
+![The settings panel](docs/winmoji-settings.png) ![The keyboard shortcuts page](docs/winmoji-shortcuts.png)
+
+The settings panel changes every value below without editing a file. Enter changes the focused value with wrap-around and previews immediately, Escape and Back save and return, Discard restores the values from when settings opened, and Reset restores stock defaults.
 
 The optional configuration file is `%APPDATA%\winmoji\config.toml`:
 
@@ -51,15 +78,41 @@ emoji_font = "Segoe UI Emoji"
 skin_tone = "default"
 ```
 
-Supported modifiers are `Ctrl`, `Alt`, `Shift`, and `Win`. The key can be a letter, digit, `F1` through `F24`, `Space`, `Enter`, `Tab`, `Escape`, or common punctuation. Punctuation accepts its literal form or the names `period`, `comma`, `slash`, `backslash`, `semicolon`, `apostrophe`, `minus`, `equals`, `left bracket`, `right bracket`, and `grave`. The configured shortcut always uses `MOD_NOREPEAT`.
+| Key | Accepts | Default |
+| --- | --- | --- |
+| `hotkey` | A chord, see below | `Ctrl+Shift+.` |
+| `width` | 360 to 920 | `440` |
+| `height` | 300 to 760 | `380` |
+| `font_scale` | 80 to 160, a percentage | `100` |
+| `details` | `none`, `type`, `codepoint`, `both` | `both` |
+| `emoji_font` | `Segoe UI Emoji`, `Segoe UI Symbol` | `Segoe UI Emoji` |
+| `skin_tone` | `default`, `light`, `medium-light`, `medium`, `medium-dark`, `dark` | `default` |
+| `key_<action>` | A chord, one line per rebound action | The table above |
 
-`width` accepts 360 through 920. `height` accepts 300 through 760. `font_scale` is a percentage from 80 through 160. Each action's binding is a `key_<action>` line written in the same form as `hotkey`; unlike `hotkey` these may be bare keys, except for keys that would otherwise be typed into the search field. Values are clamped to the active monitor work area. `details` accepts `none`, `type`, `codepoint`, or `both`. `emoji_font` accepts `Segoe UI Emoji` or `Segoe UI Symbol`. `skin_tone` accepts `default`, `light`, `medium-light`, `medium`, `medium-dark`, or `dark`.
+`width` and `height` are clamped to the active monitor work area. Each `key_<action>` line takes the same form as `hotkey`, except that these may be bare keys.
 
-The settings panel changes all of these values without editing the file. Enter changes the focused value with wrap-around, and value changes preview immediately. Escape and the Back button save and return to the picker. Discard restores the values from when settings opened. Reset restores stock defaults and keeps settings open for inspection.
+A chord combines any of the modifiers `Ctrl`, `Alt`, `Shift`, and `Win` with one key: a letter, a digit, `F1` through `F24`, `Space`, `Enter`, `Tab`, `Escape`, the arrows, `Page Up`, `Page Down`, `Home`, `End`, `Insert`, `Delete`, `Backspace`, or punctuation. Punctuation accepts its literal form or a name: `period`, `comma`, `slash`, `backslash`, `semicolon`, `apostrophe`, `minus`, `equals`, `left bracket`, `right bracket`, `grave`. The global `hotkey` always uses `MOD_NOREPEAT`.
+
+The responsive popup uses Direct2D and DirectWrite, with continuous width and height controls, Segoe UI Emoji colour glyphs or monochrome Segoe UI Symbol glyphs, and a clickable control for every search, browse, insert, and settings action.
 
 ## Start with Windows
 
-`winmoji.exe --install` copies the executable to `%LOCALAPPDATA%\Programs\WinMoji\winmoji.exe`, adds that stable path to the current user's `HKCU` Run entry, and starts the hotkey listener immediately. `winmoji.exe --uninstall` removes the startup entry. Both operations are idempotent and require no elevation. Add `--dry-run` to inspect the target without changing the registry.
+`winmoji.exe --install` copies the executable to `%LOCALAPPDATA%\Programs\WinMoji\winmoji.exe`, adds that stable path to the current user's `HKCU` Run entry, and starts the hotkey listener immediately. `winmoji.exe --uninstall` removes the startup entry. Both are idempotent and need no elevation. Add `--dry-run` to inspect the target without changing the registry.
+
+## Command line
+
+| Command | Effect |
+| --- | --- |
+| `winmoji` | Show the picker, or show the running instance |
+| `winmoji --startup` | Start the hotkey listener without opening the popup |
+| `winmoji --preview` | Keep the window visible when it loses focus |
+| `winmoji --install` | Add WinMoji to the current user's startup apps |
+| `winmoji --uninstall` | Remove the startup entry |
+| `winmoji --self-test` | Test search, hotkey registration, and Unicode input |
+| `winmoji --benchmark` | Measure full-catalog search latency |
+| `winmoji --help` | Show the command list |
+
+`--dry-run` pairs with `--install` and `--uninstall`.
 
 ## Build and verify
 
@@ -74,11 +127,7 @@ cargo +stable-msvc build --release
 
 WinMoji builds with the MSVC toolchain and a Windows SDK. `stable-msvc` resolves to the host's MSVC toolchain; `rustup default stable-msvc` removes the need for the prefix. `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` are both supported, and adding `--target <triple>` cross-compiles to the other, placing the binary under `target\<triple>\release\`.
 
-The `console` feature keeps diagnostic output attached to the terminal. `--self-test` needs an interactive desktop session because Windows rejects foreground changes from background runners. The final command produces the default Windows-subsystem binary, so startup and ordinary launches do not create a console window.
-
-## Command line
-
-Run `winmoji.exe --help` for the complete command list. A second ordinary launch signals the resident instance to show its existing popup. `--startup` starts the hotkey listener without opening the popup. `--preview` keeps the window visible when it loses focus for visual inspection.
+The `console` feature keeps diagnostic output attached to the terminal, which `--self-test` and `--benchmark` need to report anywhere other than a message box. `--self-test` also needs an interactive desktop session, because Windows rejects foreground changes from background runners. The final command produces the default Windows-subsystem binary, so startup and ordinary launches do not create a console window.
 
 ## License
 
