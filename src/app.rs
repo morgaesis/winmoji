@@ -114,7 +114,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 #[cfg(not(feature = "console"))]
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MESSAGEBOX_STYLE, MessageBoxW};
-use windows::core::{Error, HRESULT, Interface, PCWSTR, Result, w};
+use windows::core::{BOOL, Error, HRESULT, Interface, PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
 use crate::catalog::{self, Match};
@@ -477,6 +477,7 @@ enum HitTarget {
     Settings,
     Browse,
     SearchClear,
+    SearchField,
     Category(usize),
     CategoryScrollLeft,
     CategoryScrollRight,
@@ -865,6 +866,8 @@ struct AppState {
     /// Cursor offset from the window's bottom-right corner while the corner
     /// grip is being dragged, in physical pixels.
     dragging_resize: Option<(i32, i32)>,
+    /// A click in the search field is held so the drag can extend a selection.
+    dragging_search: bool,
     capturing_shortcut: bool,
     keyboard_state: [u8; 256],
     pending_commit: Option<bool>,
@@ -1072,6 +1075,7 @@ impl AppState {
             dragging_slider: None,
             dragging_scrollbar: None,
             dragging_resize: None,
+            dragging_search: false,
             capturing_shortcut: false,
             keyboard_state: [0; 256],
             pending_commit: None,
@@ -2446,7 +2450,14 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSEMOVE => {
             let (x, y) = mouse_point_dip(lparam, state.dpi);
-            if state.dragging_resize.is_some() {
+            if state.dragging_search {
+                if let Ok(caret) = search_caret_at(state, x)
+                    && caret != state.search.caret
+                {
+                    state.search.caret = caret;
+                    invalidate(state.hwnd);
+                }
+            } else if state.dragging_resize.is_some() {
                 update_dragged_resize(state);
             } else if state.dragging_slider.is_some() {
                 update_dragged_slider(state, x);
@@ -2480,7 +2491,8 @@ unsafe extern "system" fn window_proc(
             let was_dragging_scrollbar = state.dragging_scrollbar.is_some();
             let was_dragging = state.dragging_slider.is_some()
                 || was_dragging_scrollbar
-                || state.dragging_resize.is_some();
+                || state.dragging_resize.is_some()
+                || state.dragging_search;
             if state.dragging_slider.take().is_some() {
                 resize_window_in_place(state);
             }
@@ -2489,6 +2501,7 @@ unsafe extern "system" fn window_proc(
                 let _ = save_config(state.config);
             }
             state.dragging_scrollbar = None;
+            state.dragging_search = false;
             if was_dragging {
                 unsafe {
                     ReleaseCapture().ok();
@@ -3370,15 +3383,21 @@ fn run_action(state: &mut AppState, action: Action) -> bool {
                 state.move_selection(1);
             }
         }
+        // Horizontal motion means the grid only while browsing. With a query
+        // typed there is nothing to move through sideways, and the caret is
+        // what the key should reach, so the press is left unhandled rather
+        // than swallowed.
         Action::SelectLeft => {
-            if browsing {
-                state.move_browse_selection(-1);
+            if !browsing {
+                return false;
             }
+            state.move_browse_selection(-1);
         }
         Action::SelectRight => {
-            if browsing {
-                state.move_browse_selection(1);
+            if !browsing {
+                return false;
             }
+            state.move_browse_selection(1);
         }
         Action::HalfPageUp | Action::HalfPageDown => {
             let back = action == Action::HalfPageUp;
@@ -3916,6 +3935,67 @@ fn visible_item_range(
     start..end.max(start)
 }
 
+/// Where the query text is laid out inside the search field.
+///
+/// Drawing and hit testing both measure from this, so a click lands on the
+/// character it appears to land on. The right edge pulls in when the clear
+/// button is showing.
+fn search_text_bounds(width: i32, query_empty: bool) -> D2D_RECT_F {
+    rect(
+        48.0,
+        SEARCH_TOP as f32 + 4.0,
+        width as f32 - if query_empty { 24.0 } else { 52.0 },
+        (SEARCH_TOP + SEARCH_HEIGHT) as f32 - 4.0,
+    )
+}
+
+fn search_text_rect(state: &AppState) -> D2D_RECT_F {
+    search_text_bounds(state.dimensions().0, state.query().is_empty())
+}
+
+/// The byte offset in `text` that `position` UTF-16 code units reaches.
+///
+/// DirectWrite counts in UTF-16 while the field stores UTF-8, so a hit test
+/// has to be translated back before it can index the string. A position
+/// landing inside a surrogate pair resolves to the start of that character.
+fn byte_offset_for_utf16(text: &str, position: u32) -> usize {
+    let mut units = 0u32;
+    for (offset, character) in text.char_indices() {
+        if units >= position {
+            return offset;
+        }
+        units += character.len_utf16() as u32;
+    }
+    text.len()
+}
+
+/// The caret position for a click `x` pixels across the picker.
+fn search_caret_at(state: &AppState, x: f32) -> Result<usize> {
+    let bounds = search_text_rect(state);
+    let wide: Vec<u16> = state.search.text.encode_utf16().collect();
+    if wide.is_empty() {
+        return Ok(0);
+    }
+    let layout = unsafe {
+        state.dwrite_factory.CreateTextLayout(
+            &wide,
+            &state.formats.search,
+            4096.0,
+            bounds.bottom - bounds.top,
+        )?
+    };
+    // The text is drawn scrolled, so undo that before asking the layout.
+    let local_x = x - bounds.left + state.search.scroll;
+    let mut trailing = BOOL::default();
+    let mut inside = BOOL::default();
+    let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+    unsafe {
+        layout.HitTestPoint(local_x, 0.0, &mut trailing, &mut inside, &mut metrics)?;
+    }
+    let position = metrics.textPosition + u32::from(trailing.as_bool());
+    Ok(byte_offset_for_utf16(&state.search.text, position))
+}
+
 fn search_clear_rect(width: i32) -> D2D_RECT_F {
     rect(
         width as f32 - 44.0,
@@ -4189,6 +4269,16 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
     {
         return Some(HitTarget::SearchClear);
     }
+    // The whole field answers, not just the laid-out text, so clicking past
+    // the end of a short query puts the caret after the last character
+    // instead of doing nothing.
+    if state.view == View::Search
+        && !state.search.text.is_empty()
+        && y >= SEARCH_TOP as f32
+        && y < (SEARCH_TOP + SEARCH_HEIGHT) as f32
+    {
+        return Some(HitTarget::SearchField);
+    }
     if state.view == View::Settings {
         if list_scrollbar_rects(state).is_some_and(|(track, _)| contains(track, x, y)) {
             return Some(HitTarget::Scrollbar);
@@ -4408,6 +4498,19 @@ fn handle_click(state: &mut AppState, x: f32, y: f32) {
             state.search.clear();
             state.update_results();
         }
+        HitTarget::SearchField => {
+            if let Ok(caret) = search_caret_at(state, x) {
+                state.search.caret = caret;
+                state.search.anchor = caret;
+                // Dragging from here extends the selection, the way a click
+                // and drag does in any other text field.
+                state.dragging_search = true;
+                unsafe {
+                    let _ = SetCapture(state.hwnd);
+                }
+                invalidate(state.hwnd);
+            }
+        }
         HitTarget::Category(index) => state.jump_to_category(index),
         HitTarget::CategoryScrollLeft => state.scroll_categories(-CATEGORY_BUTTON_WIDTH * 2.0),
         HitTarget::CategoryScrollRight => state.scroll_categories(CATEGORY_BUTTON_WIDTH * 2.0),
@@ -4530,6 +4633,11 @@ fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> {
     if let Some(resources) = &state.render {
         return Ok(resources.clone());
     }
+    // Take the scale from the window rather than from whatever was recorded
+    // last. The device is often built before the picker has ever been shown,
+    // and the show path is not the only way here, so a stale 96 would leave
+    // the layout drawn at logical size inside a physically larger frame.
+    state.dpi = window_dpi(state.hwnd);
     let client = client_rect(state.hwnd)?;
 
     let mut device: Option<ID3D11Device> = None;
@@ -5219,11 +5327,9 @@ fn draw_search_text(
     target: &ID2D1RenderTarget,
     brushes: &Brushes,
 ) -> Result<()> {
-    let (width, _) = state.dimensions();
-    let text_left = 48.0f32;
-    let text_right = width as f32 - if state.query().is_empty() { 24.0 } else { 52.0 };
-    let top = SEARCH_TOP as f32 + 4.0;
-    let bottom = (SEARCH_TOP + SEARCH_HEIGHT) as f32 - 4.0;
+    let bounds = search_text_rect(state);
+    let (text_left, text_right) = (bounds.left, bounds.right);
+    let (top, bottom) = (bounds.top, bounds.bottom);
     if state.search.text.is_empty() {
         target.draw_text(
             "Search names, symbols, or code points",
@@ -7114,6 +7220,45 @@ fn io_error(error: std::io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_utf16_positions_back_to_byte_offsets() {
+        assert_eq!(byte_offset_for_utf16("rocket", 0), 0);
+        assert_eq!(byte_offset_for_utf16("rocket", 3), 3);
+        assert_eq!(byte_offset_for_utf16("rocket", 6), 6);
+        // Past the end clamps rather than panicking on an index.
+        assert_eq!(byte_offset_for_utf16("rocket", 99), 6);
+    }
+
+    #[test]
+    fn maps_utf16_positions_across_wide_characters() {
+        // Two UTF-8 bytes, one UTF-16 unit.
+        let text = "café";
+        assert_eq!(byte_offset_for_utf16(text, 3), 3);
+        assert_eq!(byte_offset_for_utf16(text, 4), 5);
+
+        // A rocket is four UTF-8 bytes and a surrogate pair in UTF-16, so a
+        // position landing between the halves resolves to the character start.
+        let text = "a🚀b";
+        assert_eq!(byte_offset_for_utf16(text, 1), 1);
+        assert_eq!(byte_offset_for_utf16(text, 2), 5);
+        assert_eq!(byte_offset_for_utf16(text, 3), 5);
+        assert_eq!(byte_offset_for_utf16(text, 4), 6);
+    }
+
+    #[test]
+    fn search_text_bounds_leave_room_for_the_clear_button() {
+        let empty = search_text_bounds(440, true);
+        let typed = search_text_bounds(440, false);
+        assert_eq!(empty.left, typed.left);
+        // A typed query shows the clear button, so the text stops short of it.
+        assert!(typed.right < empty.right);
+        assert_eq!(empty.right, 440.0 - 24.0);
+        assert_eq!(typed.right, 440.0 - 52.0);
+        // Both sit inside the search field, which is what a click tests against.
+        assert!(typed.top >= SEARCH_TOP as f32);
+        assert!(typed.bottom <= (SEARCH_TOP + SEARCH_HEIGHT) as f32);
+    }
 
     #[test]
     fn parses_cli_modes() {

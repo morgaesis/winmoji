@@ -52,6 +52,8 @@ These are fixed, and edit the search field rather than the selection:
 | Paste into the search | `Ctrl+V` |
 | Delete the previous word | `Ctrl+Backspace` |
 
+Clicking in the search field puts the caret where you click, and dragging from there selects a range. `Left` and `Right` move the caret whenever a query is typed; with the field empty they move the grid selection instead, since there is no caret to carry.
+
 The scrollbar takes a direct drag and its grip grows under the pointer. The mouse wheel browses smoothly, the category rail scrolls with a vertical or horizontal wheel gesture while hovering it, and category focus follows the visible section. PrintScreen and Win-key shortcuts pass through while the picker is open, so system screenshots keep working.
 
 ### Insertion behaviour
