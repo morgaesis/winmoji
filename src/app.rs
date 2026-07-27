@@ -522,12 +522,12 @@ struct TextFormats {
 impl TextFormats {
     /// `scale` multiplies every size, so the whole picker reads larger or
     /// smaller together rather than the labels drifting away from the glyphs.
-    unsafe fn new(factory: &IDWriteFactory, emoji_font: EmojiFont, scale: f32) -> Result<Self> {
+    fn new(factory: &IDWriteFactory, emoji_font: EmojiFont, scale: f32) -> Result<Self> {
         let emoji_family = match emoji_font {
             EmojiFont::SegoeEmoji => w!("Segoe UI Emoji"),
             EmojiFont::SegoeSymbol => w!("Segoe UI Symbol"),
         };
-        let create_text_format = |factory: &IDWriteFactory, family, size: f32, bold| unsafe {
+        let create_text_format = |factory: &IDWriteFactory, family, size: f32, bold| {
             create_text_format(factory, family, size * scale, bold)
         };
         let glyph = create_text_format(factory, emoji_family, 26.0, false)?;
@@ -603,7 +603,7 @@ impl TextFormats {
     }
 }
 
-unsafe fn create_text_format(
+fn create_text_format(
     factory: &IDWriteFactory,
     family: PCWSTR,
     size: f32,
@@ -632,7 +632,7 @@ unsafe fn create_text_format(
     Ok(format)
 }
 
-unsafe fn build_displayable_entry_index(factory: &IDWriteFactory) -> Result<Vec<bool>> {
+fn build_displayable_entry_index(factory: &IDWriteFactory) -> Result<Vec<bool>> {
     let mut collection: Option<IDWriteFontCollection> = None;
     unsafe {
         factory.GetSystemFontCollection(&mut collection, false)?;
@@ -650,7 +650,7 @@ unsafe fn build_displayable_entry_index(factory: &IDWriteFactory) -> Result<Vec<
         w!("Cambria Math"),
     ]
     .into_iter()
-    .filter_map(|family| unsafe { system_font_face(&collection, family).ok() })
+    .filter_map(|family| system_font_face(&collection, family).ok())
     .collect::<Vec<_>>();
     if faces.is_empty() {
         return Err(Error::new(
@@ -674,13 +674,13 @@ unsafe fn build_displayable_entry_index(factory: &IDWriteFactory) -> Result<Vec<
                 .all(|character| {
                     faces
                         .iter()
-                        .any(|face| unsafe { font_face_has_character(face, character) })
+                        .any(|face| font_face_has_character(face, character))
                 })
         })
         .collect())
 }
 
-unsafe fn system_font_face(
+fn system_font_face(
     collection: &IDWriteFontCollection,
     family_name: PCWSTR,
 ) -> Result<IDWriteFontFace> {
@@ -706,7 +706,7 @@ unsafe fn system_font_face(
     unsafe { font.CreateFontFace() }
 }
 
-unsafe fn font_face_has_character(face: &IDWriteFontFace, character: char) -> bool {
+fn font_face_has_character(face: &IDWriteFontFace, character: char) -> bool {
     let codepoint = character as u32;
     let mut glyph = 0u16;
     unsafe { face.GetGlyphIndices(&codepoint, 1, &mut glyph).is_ok() && glyph != 0 }
@@ -961,7 +961,7 @@ fn atlas_slot_rect(slot: u32) -> D2D_RECT_F {
 
 /// Allocate an empty atlas page. Clearing once here means the per-glyph
 /// batches never need to clear, so they only draw.
-unsafe fn create_atlas_page(target: &ID2D1RenderTarget) -> Result<AtlasPage> {
+fn create_atlas_page(target: &ID2D1RenderTarget) -> Result<AtlasPage> {
     let side = GLYPH_TILE * ATLAS_SIDE as f32;
     let size = D2D_SIZE_F {
         width: side,
@@ -1045,31 +1045,28 @@ struct Brushes {
     danger: ID2D1SolidColorBrush,
 }
 
-unsafe fn create_brushes(target: &ID2D1RenderTarget) -> Result<Brushes> {
-    unsafe {
-        Ok(Brushes {
-            surface: solid_brush(target, 0x1b1e25)?,
-            surface_border: solid_brush(target, 0x30343e)?,
-            selection: solid_brush(target, 0x2b3140)?,
-            selection_border: solid_brush(target, 0x59647c)?,
-            glyph_surface: solid_brush(target, 0x181b21)?,
-            primary: solid_brush(target, 0xf4f6fb)?,
-            secondary: solid_brush(target, 0x9ba3b4)?,
-            accent: solid_brush(target, 0x9b8cff)?,
-            danger: solid_brush(target, 0xff716c)?,
-        })
-    }
+fn create_brushes(target: &ID2D1RenderTarget) -> Result<Brushes> {
+    Ok(Brushes {
+        surface: solid_brush(target, 0x1b1e25)?,
+        surface_border: solid_brush(target, 0x30343e)?,
+        selection: solid_brush(target, 0x2b3140)?,
+        selection_border: solid_brush(target, 0x59647c)?,
+        glyph_surface: solid_brush(target, 0x181b21)?,
+        primary: solid_brush(target, 0xf4f6fb)?,
+        secondary: solid_brush(target, 0x9ba3b4)?,
+        accent: solid_brush(target, 0x9b8cff)?,
+        danger: solid_brush(target, 0xff716c)?,
+    })
 }
 
 impl AppState {
-    unsafe fn new(keep_visible: bool, config: Config) -> Result<Self> {
+    fn new(keep_visible: bool, config: Config) -> Result<Self> {
         let d2d_factory: ID2D1Factory1 =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
         let dwrite_factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
-        let formats =
-            unsafe { TextFormats::new(&dwrite_factory, config.emoji_font, config.scale())? };
-        let displayable_entries = unsafe { build_displayable_entry_index(&dwrite_factory)? };
+        let formats = TextFormats::new(&dwrite_factory, config.emoji_font, config.scale())?;
+        let displayable_entries = build_displayable_entry_index(&dwrite_factory)?;
         let recents = load_recents();
         let mut state = Self {
             hwnd: HWND::default(),
@@ -1189,12 +1186,10 @@ impl AppState {
         self.clamp_result_scroll();
     }
 
-    unsafe fn set_result_scroll_immediate(&mut self, position: f32) {
+    fn set_result_scroll_immediate(&mut self, position: f32) {
         self.result_scroll = position;
         self.clamp_result_scroll();
-        unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
-        }
+        invalidate(self.hwnd);
     }
 
     fn grid_columns(&self) -> usize {
@@ -1209,7 +1204,7 @@ impl AppState {
         self.query().trim().is_empty()
     }
 
-    unsafe fn update_results(&mut self) {
+    fn update_results(&mut self) {
         self.tone_picker = None;
         // Typing takes over from any scroll in flight.
         self.browse_scroll_target = self.browse_scroll;
@@ -1223,19 +1218,13 @@ impl AppState {
         self.selected = 0;
         self.hovered_entry = None;
         self.status = None;
-        unsafe {
-            self.sync_accessible_results();
-        }
-        unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
-        }
+        self.sync_accessible_results();
+        invalidate(self.hwnd);
     }
 
-    unsafe fn move_selection(&mut self, delta: isize) {
+    fn move_selection(&mut self, delta: isize) {
         if self.view == View::Search && self.query().trim().is_empty() {
-            unsafe {
-                self.move_browse_selection(delta);
-            }
+            self.move_browse_selection(delta);
             return;
         }
         if self.matches.is_empty() {
@@ -1253,11 +1242,11 @@ impl AppState {
                 Some(WPARAM(self.selected)),
                 None,
             );
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
+            invalidate(self.hwnd);
         }
     }
 
-    unsafe fn move_browse_selection(&mut self, delta: isize) {
+    fn move_browse_selection(&mut self, delta: isize) {
         let total = self
             .browse_sections
             .iter()
@@ -1270,10 +1259,8 @@ impl AppState {
         let next = current.saturating_add_signed(delta).min(total - 1);
         self.set_browse_flat_position(next);
         self.ensure_browse_selection_visible();
-        unsafe {
-            self.sync_accessible_results();
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
-        }
+        self.sync_accessible_results();
+        invalidate(self.hwnd);
     }
 
     fn browse_flat_position(&self) -> usize {
@@ -1473,12 +1460,10 @@ impl AppState {
         }
     }
 
-    unsafe fn scroll_categories(&mut self, delta: f32) {
+    fn scroll_categories(&mut self, delta: f32) {
         self.category_scroll += delta;
         self.clamp_category_scroll();
-        unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
-        }
+        invalidate(self.hwnd);
     }
 
     /// Page-sized keyboard scrolling: a discrete jump eased toward its
@@ -1519,12 +1504,10 @@ impl AppState {
             .clamp(0.0, self.maximum_settings_scroll());
     }
 
-    unsafe fn set_settings_scroll_immediate(&mut self, position: f32) {
+    fn set_settings_scroll_immediate(&mut self, position: f32) {
         self.settings_scroll = position;
         self.clamp_settings_scroll();
-        unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
-        }
+        invalidate(self.hwnd);
     }
 
     /// Keep the focused settings row inside the viewport after it moves, so
@@ -1559,12 +1542,10 @@ impl AppState {
             .clamp(0.0, self.maximum_shortcut_scroll());
     }
 
-    unsafe fn set_shortcut_scroll_immediate(&mut self, position: f32) {
+    fn set_shortcut_scroll_immediate(&mut self, position: f32) {
         self.shortcut_scroll = position;
         self.clamp_shortcut_scroll();
-        unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
-        }
+        invalidate(self.hwnd);
     }
 
     /// Whether the footer actions are in their keep-open form. Holding Shift
@@ -1614,16 +1595,14 @@ impl AppState {
     }
 
     /// Cancel any scroll animation, leaving the content where it stands.
-    unsafe fn settle_scroll(&mut self) {
+    fn settle_scroll(&mut self) {
         self.browse_scroll_target = self.browse_scroll;
         self.browse_animation = ScrollAnimation::Idle;
         self.last_frame = None;
-        unsafe {
-            self.sync_accessible_results();
-        }
+        self.sync_accessible_results();
     }
 
-    unsafe fn tick_browse_scroll(&mut self, dt: f32) {
+    fn tick_browse_scroll(&mut self, dt: f32) {
         match self.browse_animation {
             ScrollAnimation::Idle => {}
             ScrollAnimation::Ease => {
@@ -1638,9 +1617,7 @@ impl AppState {
                 let distance = self.browse_scroll_target - self.browse_scroll;
                 if distance.abs() < 0.35 {
                     self.browse_scroll = self.browse_scroll_target;
-                    unsafe {
-                        self.settle_scroll();
-                    }
+                    self.settle_scroll();
                 } else {
                     self.browse_scroll =
                         smooth_scroll_step(self.browse_scroll, self.browse_scroll_target, dt);
@@ -1650,18 +1627,16 @@ impl AppState {
         self.update_active_category();
     }
 
-    unsafe fn set_browse_scroll_immediate(&mut self, position: f32) {
+    fn set_browse_scroll_immediate(&mut self, position: f32) {
         let position = position.clamp(0.0, self.maximum_browse_scroll());
         self.browse_scroll = position;
         self.browse_scroll_target = position;
         self.browse_animation = ScrollAnimation::Idle;
         self.update_active_category();
-        unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
-        }
+        invalidate(self.hwnd);
     }
 
-    unsafe fn jump_to_category(&mut self, category_index: usize) {
+    fn jump_to_category(&mut self, category_index: usize) {
         let category = BrowseCategory::ALL[category_index.min(BrowseCategory::ALL.len() - 1)];
         if let Some(section_index) = self
             .browse_sections
@@ -1677,10 +1652,8 @@ impl AppState {
             if self.browse_scroll_target != self.browse_scroll {
                 self.browse_animation = ScrollAnimation::Ease;
             }
-            unsafe {
-                self.sync_accessible_results();
-                let _ = InvalidateRect(Some(self.hwnd), None, false);
-            }
+            self.sync_accessible_results();
+            invalidate(self.hwnd);
         }
     }
 
@@ -1748,22 +1721,18 @@ impl AppState {
         self.hovered_entry.or_else(|| self.selected_entry_index())
     }
 
-    unsafe fn rebuild_formats(&mut self) -> Result<()> {
-        self.formats = unsafe {
-            TextFormats::new(
-                &self.dwrite_factory,
-                self.config.emoji_font,
-                self.config.scale(),
-            )?
-        };
+    fn rebuild_formats(&mut self) -> Result<()> {
+        self.formats = TextFormats::new(
+            &self.dwrite_factory,
+            self.config.emoji_font,
+            self.config.scale(),
+        )?;
         self.render = None;
-        unsafe {
-            let _ = InvalidateRect(Some(self.hwnd), None, false);
-        }
+        invalidate(self.hwnd);
         Ok(())
     }
 
-    unsafe fn sync_accessible_results(&self) {
+    fn sync_accessible_results(&self) {
         if self.accessible_results.is_invalid() {
             return;
         }
@@ -1954,7 +1923,7 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
         if GetLastError() == ERROR_ALREADY_EXISTS {
             for _ in 0..200 {
                 if let Ok(existing) = FindWindowW(CLASS_NAME, PCWSTR::null()) {
-                    let target = GetForegroundWindow();
+                    let target = foreground_window();
                     let target_focus = focused_child_for(target);
                     PostMessageW(
                         Some(existing),
@@ -2115,7 +2084,7 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
     }
 }
 
-unsafe fn configure_window_frame(hwnd: HWND) {
+fn configure_window_frame(hwnd: HWND) {
     let dark_mode = 1i32;
     let corner_preference: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
     let border_color = COLORREF(0x003e3430);
@@ -2141,7 +2110,7 @@ unsafe fn configure_window_frame(hwnd: HWND) {
     }
 }
 
-unsafe fn set_accessible_name(hwnd: HWND, name: PCWSTR) {
+fn set_accessible_name(hwnd: HWND, name: PCWSTR) {
     let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
     let service: Result<IAccPropServices> = unsafe {
         CoCreateInstance(
@@ -2162,7 +2131,7 @@ unsafe fn set_accessible_name(hwnd: HWND, name: PCWSTR) {
     }
 }
 
-unsafe fn register_picker_class(instance: HINSTANCE) -> Result<()> {
+fn register_picker_class(instance: HINSTANCE) -> Result<()> {
     let cursor = unsafe { LoadCursorW(None, IDC_ARROW)? };
     let class = WNDCLASSW {
         style: CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW,
@@ -2209,7 +2178,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     let hwnd = HWND(HOOK_STATE.hwnd.load(Ordering::Acquire) as *mut c_void);
     let target = HWND(HOOK_STATE.target.load(Ordering::Acquire) as *mut c_void);
     let keep_visible = HOOK_STATE.keep_visible.load(Ordering::Acquire);
-    if !keep_visible && unsafe { GetForegroundWindow() } != target {
+    if !keep_visible && foreground_window() != target {
         unsafe {
             let _ = PostMessageW(Some(hwnd), WM_CAPTURE_TARGET_LOST, WPARAM(0), LPARAM(0));
         }
@@ -2245,6 +2214,25 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
     LRESULT(1)
+}
+
+/// Mark the whole client area of `hwnd` for repainting.
+///
+/// `InvalidateRect` reports a bad handle through its return value rather than
+/// misbehaving, and the repaint it queues carries no borrow, so there is
+/// nothing for a caller to uphold.
+fn invalidate(hwnd: HWND) {
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
+/// The window the system currently treats as foreground.
+///
+/// Returns an invalid handle when no window qualifies, which callers already
+/// have to handle; the value is a plain handle, so nothing outlives the call.
+fn foreground_window() -> HWND {
+    unsafe { GetForegroundWindow() }
 }
 
 fn cursor_over_window(hwnd: HWND) -> bool {
@@ -2286,7 +2274,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-unsafe fn start_keyboard_capture(state: &mut AppState) -> Result<()> {
+fn start_keyboard_capture(state: &mut AppState) -> Result<()> {
     if state.capture_active {
         return Ok(());
     }
@@ -2309,7 +2297,7 @@ unsafe fn start_keyboard_capture(state: &mut AppState) -> Result<()> {
     Ok(())
 }
 
-unsafe fn stop_keyboard_capture(state: &mut AppState) {
+fn stop_keyboard_capture(state: &mut AppState) {
     HOOK_STATE.active.store(false, Ordering::Release);
     state.capture_active = false;
     state.pending_commit = None;
@@ -2438,11 +2426,9 @@ unsafe extern "system" fn window_proc(
                     if state.view == View::Shortcuts {
                         state.shortcut_selected = state.selected.min(Action::ALL.len() - 1);
                     }
-                    unsafe {
-                        let _ = InvalidateRect(Some(state.hwnd), None, false);
-                        if notification as u32 == LBN_DBLCLK && state.view != View::Settings {
-                            commit_selection(state, true);
-                        }
+                    invalidate(state.hwnd);
+                    if notification as u32 == LBN_DBLCLK && state.view != View::Settings {
+                        commit_selection(state, true);
                     }
                 }
             }
@@ -2450,16 +2436,14 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSEMOVE => {
             let (x, y) = mouse_point_dip(lparam, state.dpi);
-            unsafe {
-                if state.dragging_resize.is_some() {
-                    update_dragged_resize(state);
-                } else if state.dragging_slider.is_some() {
-                    update_dragged_slider(state, x);
-                } else if state.dragging_scrollbar.is_some() {
-                    update_dragged_scrollbar(state, y);
-                } else {
-                    update_hover(state, x, y);
-                }
+            if state.dragging_resize.is_some() {
+                update_dragged_resize(state);
+            } else if state.dragging_slider.is_some() {
+                update_dragged_slider(state, x);
+            } else if state.dragging_scrollbar.is_some() {
+                update_dragged_scrollbar(state, y);
+            } else {
+                update_hover(state, x, y);
             }
             LRESULT(0)
         }
@@ -2479,9 +2463,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_LBUTTONDOWN => {
             let (x, y) = mouse_point_dip(lparam, state.dpi);
-            unsafe {
-                handle_click(state, x, y);
-            }
+            handle_click(state, x, y);
             LRESULT(0)
         }
         WM_LBUTTONUP => {
@@ -2490,9 +2472,7 @@ unsafe extern "system" fn window_proc(
                 || was_dragging_scrollbar
                 || state.dragging_resize.is_some();
             if state.dragging_slider.take().is_some() {
-                unsafe {
-                    resize_window_in_place(state);
-                }
+                resize_window_in_place(state);
             }
             if state.dragging_resize.take().is_some() {
                 // The drag is the authoritative size; keep it across restarts.
@@ -2511,37 +2491,27 @@ unsafe extern "system" fn window_proc(
         }
         WM_RBUTTONDOWN => {
             let (x, y) = mouse_point_dip(lparam, state.dpi);
-            unsafe {
-                open_tone_picker(state, x, y);
-            }
+            open_tone_picker(state, x, y);
             LRESULT(0)
         }
         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
-            unsafe {
-                route_wheel(state, message == WM_MOUSEHWHEEL, wparam, lparam);
-            }
+            route_wheel(state, message == WM_MOUSEHWHEEL, wparam, lparam);
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == FOCUS_TIMER_ID => {
-            if !state.keep_visible && unsafe { GetForegroundWindow() } != state.target {
-                unsafe {
-                    hide_picker(state);
-                }
+            if !state.keep_visible && foreground_window() != state.target {
+                hide_picker(state);
             }
             LRESULT(0)
         }
         WM_CAPTURED_KEY => {
             let scan_code = lparam.0 as u64 as u32;
             let key_up = ((lparam.0 as u64 >> 32) & 1) != 0;
-            unsafe {
-                handle_captured_key(state, VIRTUAL_KEY(wparam.0 as u16), scan_code, key_up);
-            }
+            handle_captured_key(state, VIRTUAL_KEY(wparam.0 as u16), scan_code, key_up);
             LRESULT(0)
         }
         WM_CAPTURE_TARGET_LOST => {
-            unsafe {
-                hide_picker(state);
-            }
+            hide_picker(state);
             LRESULT(0)
         }
         WM_DPICHANGED => {
@@ -2565,17 +2535,13 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_SIZE => {
-            unsafe {
-                resize_swapchain(state);
-                let _ = InvalidateRect(Some(hwnd), None, false);
-            }
+            resize_swapchain(state);
+            invalidate(hwnd);
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
-            unsafe {
-                paint(state);
-            }
+            paint(state);
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -2612,7 +2578,7 @@ fn usage_counts(recents: &[RecentGlyph]) -> catalog::UsageCounts {
 /// alone then returns it to exactly that spot, behind the window the user is
 /// typing into: visible to the API, invisible on screen, and passing clicks
 /// through to the application underneath.
-unsafe fn raise_picker_window(hwnd: HWND) {
+fn raise_picker_window(hwnd: HWND) {
     unsafe {
         SetWindowPos(
             hwnd,
@@ -2635,47 +2601,43 @@ unsafe fn show_picker(
     let state = unsafe { &mut *state_pointer };
     let foreground = requested_target
         .filter(|target| !target.is_invalid() && unsafe { IsWindow(Some(*target)).as_bool() })
-        .unwrap_or_else(|| unsafe { GetForegroundWindow() });
+        .unwrap_or_else(foreground_window);
     if foreground != state.hwnd && !foreground.is_invalid() {
         state.target = foreground;
         state.target_focus = requested_focus
             .filter(|focus| valid_target_focus(foreground, *focus))
-            .unwrap_or_else(|| unsafe { focused_child_for(foreground) });
+            .unwrap_or_else(|| focused_child_for(foreground));
     }
     state.search.clear();
     state.view = View::Search;
     state.status = None;
-    unsafe {
-        state.update_results();
-        position_near_cursor(state);
-        // Positioning settles the DPI for the monitor the picker lands on;
-        // make the device agree before anything is drawn.
-        apply_device_dpi(state);
-        // Render before showing: the window otherwise appears as an empty
-        // frame until the first WM_PAINT lands.
-        render_frame(state);
-        raise_picker_window(state.hwnd);
-        arm_focus_watch(state);
-        if let Err(error) = start_keyboard_capture(state) {
-            state.status = Some(format!("Keyboard capture unavailable: {error}"));
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-            return;
-        }
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
+    state.update_results();
+    position_near_cursor(state);
+    // Positioning settles the DPI for the monitor the picker lands on;
+    // make the device agree before anything is drawn.
+    apply_device_dpi(state);
+    // Render before showing: the window otherwise appears as an empty
+    // frame until the first WM_PAINT lands.
+    render_frame(state);
+    raise_picker_window(state.hwnd);
+    arm_focus_watch(state);
+    if let Err(error) = start_keyboard_capture(state) {
+        state.status = Some(format!("Keyboard capture unavailable: {error}"));
+        invalidate(state.hwnd);
+        return;
     }
+    invalidate(state.hwnd);
 }
 
 /// Point the device at the window's current DPI and resize the swap chain to
 /// match the client area.
-unsafe fn apply_device_dpi(state: &mut AppState) {
+fn apply_device_dpi(state: &mut AppState) {
     let dpi = unsafe { GetDpiForWindow(state.hwnd) }.max(96);
     state.dpi = dpi;
-    unsafe {
-        resize_swapchain(state);
-    }
+    resize_swapchain(state);
 }
 
-unsafe fn arm_focus_watch(state: &AppState) {
+fn arm_focus_watch(state: &AppState) {
     if !state.keep_visible {
         unsafe {
             let _ = SetTimer(Some(state.hwnd), FOCUS_TIMER_ID, FOCUS_FRAME_MS, None);
@@ -2687,7 +2649,7 @@ unsafe fn arm_focus_watch(state: &AppState) {
 /// the whole catalog leaves Direct2D and DirectWrite holding hundreds of
 /// megabytes of rasterized glyphs, which a picker that spends most of its
 /// life hidden has no business keeping.
-unsafe fn release_browsing_caches(state: &mut AppState) {
+fn release_browsing_caches(state: &mut AppState) {
     let Some(resources) = &state.render else {
         return;
     };
@@ -2706,7 +2668,7 @@ unsafe fn release_browsing_caches(state: &mut AppState) {
     }
 }
 
-unsafe fn hide_picker(state: &mut AppState) {
+fn hide_picker(state: &mut AppState) {
     state.tone_picker = None;
     // Cancel any scroll in flight so the loop never animates a hidden window.
     state.browse_scroll_target = state.browse_scroll;
@@ -2723,26 +2685,22 @@ unsafe fn hide_picker(state: &mut AppState) {
     }
 }
 
-unsafe fn enter_search(state: &mut AppState) {
+fn enter_search(state: &mut AppState) {
     state.view = View::Search;
     set_capturing_shortcut(state, false);
-    unsafe {
-        state.update_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    state.update_results();
+    invalidate(state.hwnd);
 }
 
-unsafe fn focus_browser(state: &mut AppState) {
+fn focus_browser(state: &mut AppState) {
     state.view = View::Search;
     state.status = None;
     state.browse_scroll = 0.0;
     state.browse_scroll_target = 0.0;
     state.browse_focus = (0, 0);
     state.search.clear();
-    unsafe {
-        state.rebuild_browse_sections();
-        state.update_results();
-    }
+    state.rebuild_browse_sections();
+    state.update_results();
 }
 
 /// Row geometry of the shortcut list, before scrolling is applied.
@@ -2756,47 +2714,39 @@ fn shortcut_row_rect(width: i32, index: usize) -> D2D_RECT_F {
     )
 }
 
-unsafe fn enter_shortcuts(state: &mut AppState) {
+fn enter_shortcuts(state: &mut AppState) {
     state.view = View::Shortcuts;
     state.status = None;
     state.shortcut_selected = 0;
     state.shortcut_scroll = 0.0;
     state.capturing_action = None;
     set_capturing_shortcut(state, false);
-    unsafe {
-        state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    state.sync_accessible_results();
+    invalidate(state.hwnd);
 }
 
 /// Leave the list and go back to the settings page that opened it.
-unsafe fn leave_shortcuts(state: &mut AppState) {
+fn leave_shortcuts(state: &mut AppState) {
     state.capturing_action = None;
     set_capturing_shortcut(state, false);
     state.status = None;
-    unsafe {
-        enter_settings(state);
-    }
+    enter_settings(state);
     state.settings_selected = 6;
     state.selected = 6;
     state.ensure_selected_setting_visible();
-    unsafe {
-        state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    state.sync_accessible_results();
+    invalidate(state.hwnd);
 }
 
-unsafe fn begin_capture(state: &mut AppState, action: Action) {
+fn begin_capture(state: &mut AppState, action: Action) {
     state.capturing_action = Some(action);
     set_capturing_shortcut(state, true);
     state.status = Some(format!("Press the new shortcut for {}", action.label()));
     state.status_error = false;
-    unsafe {
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    invalidate(state.hwnd);
 }
 
-unsafe fn reset_shortcuts(state: &mut AppState) {
+fn reset_shortcuts(state: &mut AppState) {
     state.config.keys = Keybinds::default();
     state.capturing_action = None;
     set_capturing_shortcut(state, false);
@@ -2812,13 +2762,11 @@ unsafe fn reset_shortcuts(state: &mut AppState) {
             state.status_error = true;
         }
     }
-    unsafe {
-        state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    state.sync_accessible_results();
+    invalidate(state.hwnd);
 }
 
-unsafe fn move_shortcut_selection(state: &mut AppState, delta: isize) {
+fn move_shortcut_selection(state: &mut AppState, delta: isize) {
     state.shortcut_selected = state
         .shortcut_selected
         .saturating_add_signed(delta)
@@ -2832,16 +2780,14 @@ unsafe fn move_shortcut_selection(state: &mut AppState, delta: isize) {
         state.shortcut_scroll = top + row - viewport;
     }
     state.clamp_shortcut_scroll();
-    unsafe {
-        state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    state.sync_accessible_results();
+    invalidate(state.hwnd);
 }
 
 /// Record a captured chord against the action being rebound. A chord another
 /// action owns is refused rather than stolen, so no action is left
 /// unreachable by a rebind the user cannot see.
-unsafe fn apply_captured_binding(state: &mut AppState, action: Action, key: VIRTUAL_KEY) {
+fn apply_captured_binding(state: &mut AppState, action: Action, key: VIRTUAL_KEY) {
     let modifiers = if state.capture_active {
         captured_hotkey_modifiers(&state.keyboard_state)
     } else {
@@ -2865,69 +2811,53 @@ unsafe fn apply_captured_binding(state: &mut AppState, action: Action, key: VIRT
             state.status_error = true;
         }
     }
-    unsafe {
-        state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    state.sync_accessible_results();
+    invalidate(state.hwnd);
 }
 
-unsafe fn handle_shortcuts_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool) -> bool {
+fn handle_shortcuts_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool) -> bool {
     if state.capturing_shortcut {
         if key == VK_ESCAPE {
             state.capturing_action = None;
             set_capturing_shortcut(state, false);
             state.status = None;
-            unsafe {
-                let _ = InvalidateRect(Some(state.hwnd), None, false);
-            }
+            invalidate(state.hwnd);
             return true;
         }
         if matches!(key, VK_CONTROL | VK_SHIFT | VK_MENU | VK_LWIN | VK_RWIN) {
             return true;
         }
         if let Some(action) = state.capturing_action {
-            unsafe {
-                apply_captured_binding(state, action, key);
-            }
+            apply_captured_binding(state, action, key);
         }
         return true;
     }
     if key == VK_ESCAPE {
-        unsafe {
-            leave_shortcuts(state);
-        }
+        leave_shortcuts(state);
         return true;
     }
     if key == VK_RETURN {
         let action = Action::ALL[state.shortcut_selected.min(Action::ALL.len() - 1)];
-        unsafe {
-            begin_capture(state, action);
-        }
+        begin_capture(state, action);
         return true;
     }
     if key == VK_UP || (control && key.0 == VK_K_VALUE) {
-        unsafe {
-            move_shortcut_selection(state, -1);
-        }
+        move_shortcut_selection(state, -1);
         return true;
     }
     if key == VK_DOWN || (control && key.0 == VK_J_VALUE) {
-        unsafe {
-            move_shortcut_selection(state, 1);
-        }
+        move_shortcut_selection(state, 1);
         return true;
     }
     if key == VK_PRIOR || key == VK_NEXT {
         let rows = (state.shortcut_viewport() / SHORTCUT_ROW_HEIGHT as f32).max(1.0) as isize;
-        unsafe {
-            move_shortcut_selection(state, if key == VK_PRIOR { -rows } else { rows });
-        }
+        move_shortcut_selection(state, if key == VK_PRIOR { -rows } else { rows });
         return true;
     }
     key == VK_TAB
 }
 
-unsafe fn enter_settings(state: &mut AppState) {
+fn enter_settings(state: &mut AppState) {
     if state.view != View::Settings {
         state.settings_original = state.config;
     }
@@ -2939,43 +2869,37 @@ unsafe fn enter_settings(state: &mut AppState) {
     state.selected = 0;
     state.settings_scroll = 0.0;
     set_capturing_shortcut(state, false);
-    unsafe {
-        state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    state.sync_accessible_results();
+    invalidate(state.hwnd);
 }
 
 /// Change the text scale by `steps` and keep it. Every size the picker draws
 /// derives from this, so the formats are rebuilt and the window re-laid out.
-unsafe fn adjust_font_scale(state: &mut AppState, steps: i32) {
+fn adjust_font_scale(state: &mut AppState, steps: i32) {
     let scaled =
         (state.config.font_scale + steps * FONT_SCALE_STEP).clamp(MIN_FONT_SCALE, MAX_FONT_SCALE);
     if scaled == state.config.font_scale {
         return;
     }
     state.config.font_scale = scaled;
-    unsafe {
-        if let Err(error) = state.rebuild_formats() {
-            state.status = Some(format!("Could not resize the text: {error}"));
-            return;
-        }
-        state.rebuild_browse_sections_preserving_view();
-        state.clamp_result_scroll();
-        state.ensure_selected_result_visible();
-        state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
+    if let Err(error) = state.rebuild_formats() {
+        state.status = Some(format!("Could not resize the text: {error}"));
+        return;
     }
+    state.rebuild_browse_sections_preserving_view();
+    state.clamp_result_scroll();
+    state.ensure_selected_result_visible();
+    state.sync_accessible_results();
+    invalidate(state.hwnd);
     if let Err(error) = save_config(state.config) {
         eprintln!("winmoji: could not save the text size: {error}");
     }
 }
 
-unsafe fn adjust_setting(state: &mut AppState, delta: isize) {
+fn adjust_setting(state: &mut AppState, delta: isize) {
     if setting_is_action(state.settings_selected) {
         // Nothing to step through, so either direction runs the row.
-        unsafe {
-            activate_setting(state);
-        }
+        activate_setting(state);
         return;
     }
     match state.settings_selected {
@@ -2987,9 +2911,7 @@ unsafe fn adjust_setting(state: &mut AppState, delta: isize) {
                 .saturating_add((delta * 4) as i32)
                 .clamp(MIN_PICKER_WIDTH, MAX_PICKER_WIDTH);
             state.display_dimensions = state.config.dimensions;
-            unsafe {
-                resize_window_in_place(state);
-            }
+            resize_window_in_place(state);
         }
         1 => {
             state.config.dimensions.height = state
@@ -2999,17 +2921,15 @@ unsafe fn adjust_setting(state: &mut AppState, delta: isize) {
                 .saturating_add((delta * 4) as i32)
                 .clamp(MIN_PICKER_HEIGHT, MAX_PICKER_HEIGHT);
             state.display_dimensions = state.config.dimensions;
-            unsafe {
-                resize_window_in_place(state);
-            }
+            resize_window_in_place(state);
         }
-        2 => unsafe {
+        2 => {
             adjust_font_scale(state, delta as i32);
-        },
+        }
         3 => state.config.details = state.config.details.next(delta),
         4 => {
             state.config.emoji_font = state.config.emoji_font.next(delta);
-            if let Err(error) = unsafe { state.rebuild_formats() } {
+            if let Err(error) = state.rebuild_formats() {
                 state.status = Some(format!("Could not change emoji font: {error}"));
             }
         }
@@ -3019,17 +2939,15 @@ unsafe fn adjust_setting(state: &mut AppState, delta: isize) {
         _ => {}
     }
     state.selected = state.settings_selected;
-    unsafe {
-        state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    state.sync_accessible_results();
+    invalidate(state.hwnd);
 }
 
 /// Enter on a settings row changes that row's value in place (cycling with
 /// wrap-around) or records a new shortcut; the change previews immediately.
-unsafe fn activate_setting(state: &mut AppState) {
+fn activate_setting(state: &mut AppState) {
     match state.settings_selected {
-        2 => unsafe {
+        2 => {
             // Wrap back to the smallest once the largest is reached, the way
             // the other cycling rows do.
             let steps = if state.config.font_scale >= MAX_FONT_SCALE {
@@ -3038,7 +2956,7 @@ unsafe fn activate_setting(state: &mut AppState) {
                 1
             };
             adjust_font_scale(state, steps);
-        },
+        }
         3 => {
             state.config.details = if state.config.details == DetailMode::Both {
                 DetailMode::None
@@ -3051,17 +2969,17 @@ unsafe fn activate_setting(state: &mut AppState) {
                 EmojiFont::SegoeEmoji => EmojiFont::SegoeSymbol,
                 EmojiFont::SegoeSymbol => EmojiFont::SegoeEmoji,
             };
-            if let Err(error) = unsafe { state.rebuild_formats() } {
+            if let Err(error) = state.rebuild_formats() {
                 state.status = Some(format!("Could not change emoji font: {error}"));
             }
         }
         5 => {
             state.config.skin_tone = state.config.skin_tone.cycled();
         }
-        6 => unsafe {
+        6 => {
             enter_shortcuts(state);
             return;
-        },
+        }
         7 => {
             state.capturing_action = None;
             set_capturing_shortcut(state, true);
@@ -3069,19 +2987,15 @@ unsafe fn activate_setting(state: &mut AppState) {
         }
         _ => {}
     }
-    unsafe {
-        state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    state.sync_accessible_results();
+    invalidate(state.hwnd);
 }
 
-unsafe fn save_settings(state: &mut AppState) {
+fn save_settings(state: &mut AppState) {
     let previous_hotkey = state.registered_hotkey;
-    if let Err(error) = unsafe { apply_registered_hotkey(state) } {
+    if let Err(error) = apply_registered_hotkey(state) {
         state.status = Some(error);
-        unsafe {
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        invalidate(state.hwnd);
         return;
     }
     if let Err(error) = save_config(state.config) {
@@ -3098,40 +3012,32 @@ unsafe fn save_settings(state: &mut AppState) {
             state.registered_hotkey = previous_hotkey;
         }
         state.status = Some(format!("Could not save settings: {error}"));
-        unsafe {
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        invalidate(state.hwnd);
         return;
     }
     state.settings_original = state.config;
-    unsafe {
-        enter_search(state);
-    }
+    enter_search(state);
 }
 
-unsafe fn discard_settings(state: &mut AppState) {
+fn discard_settings(state: &mut AppState) {
     state.config = state.settings_original;
     state.display_dimensions = state.config.dimensions;
-    unsafe {
-        let _ = state.rebuild_formats();
-        resize_window_in_place(state);
-        enter_search(state);
-    }
+    let _ = state.rebuild_formats();
+    resize_window_in_place(state);
+    enter_search(state);
 }
 
-unsafe fn reset_settings(state: &mut AppState) {
+fn reset_settings(state: &mut AppState) {
     state.config = Config::default();
     state.display_dimensions = state.config.dimensions;
     state.status = None;
-    unsafe {
-        let _ = state.rebuild_formats();
-        resize_window_in_place(state);
-        state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    let _ = state.rebuild_formats();
+    resize_window_in_place(state);
+    state.sync_accessible_results();
+    invalidate(state.hwnd);
 }
 
-unsafe fn apply_registered_hotkey(state: &mut AppState) -> std::result::Result<(), String> {
+fn apply_registered_hotkey(state: &mut AppState) -> std::result::Result<(), String> {
     if state.config.hotkey == state.registered_hotkey {
         return Ok(());
     }
@@ -3162,28 +3068,19 @@ unsafe fn apply_registered_hotkey(state: &mut AppState) -> std::result::Result<(
     Ok(())
 }
 
-unsafe fn handle_captured_key(
-    state: &mut AppState,
-    key: VIRTUAL_KEY,
-    scan_code: u32,
-    key_up: bool,
-) {
+fn handle_captured_key(state: &mut AppState, key: VIRTUAL_KEY, scan_code: u32, key_up: bool) {
     update_captured_keyboard_state(&mut state.keyboard_state, key, key_up);
     // The footer follows Shift as it is held, so a change repaints even
     // though modifiers themselves run nothing.
     let shift_now = captured_key_down(&state.keyboard_state, VK_SHIFT);
     if shift_now != state.shift_held {
         state.shift_held = shift_now;
-        unsafe {
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        invalidate(state.hwnd);
     }
     if key_up {
         if state.pending_commit.is_some() && captured_commit_keys_released(&state.keyboard_state) {
             let close_after = state.pending_commit.take().unwrap_or(false);
-            unsafe {
-                commit_selection(state, close_after);
-            }
+            commit_selection(state, close_after);
         }
         return;
     }
@@ -3193,15 +3090,11 @@ unsafe fn handle_captured_key(
     let control = captured_key_down(&state.keyboard_state, VK_CONTROL);
     let shift = captured_key_down(&state.keyboard_state, VK_SHIFT);
     if state.view == View::Settings {
-        unsafe {
-            handle_settings_key(state, key, control);
-        }
+        handle_settings_key(state, key, control);
         return;
     }
     if state.view == View::Shortcuts {
-        unsafe {
-            handle_shortcuts_key(state, key, control);
-        }
+        handle_shortcuts_key(state, key, control);
         return;
     }
     if key == VK_RETURN {
@@ -3210,27 +3103,25 @@ unsafe fn handle_captured_key(
         state.pending_commit = Some(!shift);
         return;
     }
-    if unsafe { handle_picker_key(state, key, control, shift) } {
+    if handle_picker_key(state, key, control, shift) {
         return;
     }
     match key {
         VK_BACK => {
             state.search.backspace(control);
-            unsafe { state.update_results() };
+            state.update_results();
             return;
         }
         VK_DELETE => {
             state.search.delete_forward();
-            unsafe { state.update_results() };
+            state.update_results();
             return;
         }
         VK_LEFT | VK_RIGHT => {
             state
                 .search
                 .move_caret(if key == VK_LEFT { -1 } else { 1 }, shift);
-            unsafe {
-                let _ = InvalidateRect(Some(state.hwnd), None, false);
-            }
+            invalidate(state.hwnd);
             return;
         }
         VK_HOME | VK_END => {
@@ -3239,24 +3130,20 @@ unsafe fn handle_captured_key(
             } else {
                 state.search.move_end(shift);
             }
-            unsafe {
-                let _ = InvalidateRect(Some(state.hwnd), None, false);
-            }
+            invalidate(state.hwnd);
             return;
         }
         _ => {}
     }
     if control && key.0 == VK_A_VALUE {
         state.search.select_all();
-        unsafe {
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        invalidate(state.hwnd);
         return;
     }
     if control && key.0 == VK_V_VALUE {
         if let Some(text) = clipboard_text(state.hwnd) {
             state.search.insert(&sanitize_query(&text));
-            unsafe { state.update_results() };
+            state.update_results();
         }
         return;
     }
@@ -3285,7 +3172,7 @@ unsafe fn handle_captured_key(
         let clean: String = typed.chars().filter(|c| !c.is_control()).collect();
         if !clean.is_empty() {
             state.search.insert(&clean);
-            unsafe { state.update_results() };
+            state.update_results();
         }
     }
 }
@@ -3396,12 +3283,7 @@ fn captured_hotkey_modifiers(keyboard_state: &[u8; 256]) -> u32 {
     modifiers
 }
 
-unsafe fn handle_picker_key(
-    state: &mut AppState,
-    key: VIRTUAL_KEY,
-    control: bool,
-    shift: bool,
-) -> bool {
+fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool, shift: bool) -> bool {
     // The tone chooser is a transient popup layered over the picker, so the
     // dismiss key closes it before it closes anything else.
     if state
@@ -3412,13 +3294,11 @@ unsafe fn handle_picker_key(
         && state.tone_picker.is_some()
     {
         state.tone_picker = None;
-        unsafe {
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        invalidate(state.hwnd);
         return true;
     }
     if let Some(action) = state.config.keys.action_for(key.0 as u32, control, shift) {
-        return unsafe { run_action(state, action) };
+        return run_action(state, action);
     }
     // The numeric keypad's own plus and minus follow the text size binding
     // whenever that binding is on the main row's plus or minus.
@@ -3428,7 +3308,7 @@ unsafe fn handle_picker_key(
         } else {
             Action::TextSmaller
         };
-        return unsafe { run_action(state, action) };
+        return run_action(state, action);
     }
     if key == VK_TAB {
         return true;
@@ -3443,112 +3323,106 @@ unsafe fn handle_picker_key(
         _ => None,
     };
     if let Some(action) = arrow {
-        return unsafe { run_action(state, action) };
+        return run_action(state, action);
     }
     false
 }
 
 /// Run one bound action. Motion means different things in the two views: the
 /// grid moves by a row of cells, the result list by a row of text.
-unsafe fn run_action(state: &mut AppState, action: Action) -> bool {
+fn run_action(state: &mut AppState, action: Action) -> bool {
     let browsing = state.browsing();
     let columns = state
         .section_layouts()
         .get(state.browse_focus.0)
         .map_or(1, |layout| layout.columns) as isize;
-    unsafe {
-        match action {
-            Action::Insert => commit_selection(state, true),
-            Action::InsertKeep => commit_selection(state, false),
-            Action::Copy => copy_selection(state, true),
-            Action::CopyKeep => copy_selection(state, false),
-            Action::Dismiss => hide_picker(state),
-            Action::Settings => enter_settings(state),
-            Action::Browse => focus_browser(state),
-            Action::TextBigger => adjust_font_scale(state, 1),
-            Action::TextSmaller => adjust_font_scale(state, -1),
-            Action::SelectUp => {
-                if browsing {
-                    state.move_browse_selection(-columns);
+    match action {
+        Action::Insert => commit_selection(state, true),
+        Action::InsertKeep => commit_selection(state, false),
+        Action::Copy => copy_selection(state, true),
+        Action::CopyKeep => copy_selection(state, false),
+        Action::Dismiss => hide_picker(state),
+        Action::Settings => enter_settings(state),
+        Action::Browse => focus_browser(state),
+        Action::TextBigger => adjust_font_scale(state, 1),
+        Action::TextSmaller => adjust_font_scale(state, -1),
+        Action::SelectUp => {
+            if browsing {
+                state.move_browse_selection(-columns);
+            } else {
+                state.move_selection(-1);
+            }
+        }
+        Action::SelectDown => {
+            if browsing {
+                state.move_browse_selection(columns);
+            } else {
+                state.move_selection(1);
+            }
+        }
+        Action::SelectLeft => {
+            if browsing {
+                state.move_browse_selection(-1);
+            }
+        }
+        Action::SelectRight => {
+            if browsing {
+                state.move_browse_selection(1);
+            }
+        }
+        Action::HalfPageUp | Action::HalfPageDown => {
+            let back = action == Action::HalfPageUp;
+            if browsing {
+                let viewport = (state.footer_top() - BROWSE_CONTENT_TOP) as f32;
+                let cell = state
+                    .section_layouts()
+                    .get(state.browse_focus.0)
+                    .map_or(state.grid_cell(), |layout| layout.cell_height)
+                    .max(1);
+                let rows = ((viewport * 0.5) / cell as f32).max(1.0) as isize;
+                let jump = rows * columns;
+                state.move_browse_selection(if back { -jump } else { jump });
+            } else {
+                let rows =
+                    ((state.result_viewport() * 0.5) / state.row_height() as f32).max(1.0) as isize;
+                state.move_selection(if back { -rows } else { rows });
+            }
+        }
+        Action::PageUp | Action::PageDown => {
+            let back = action == Action::PageUp;
+            if browsing {
+                let viewport = (state.footer_top() - BROWSE_CONTENT_TOP) as f32;
+                state.scroll_browse(if back {
+                    -viewport * 0.88
                 } else {
-                    state.move_selection(-1);
-                }
-            }
-            Action::SelectDown => {
-                if browsing {
-                    state.move_browse_selection(columns);
+                    viewport * 0.88
+                });
+            } else {
+                let step = state.result_viewport() * 0.88;
+                state.set_result_scroll_immediate(if back {
+                    state.result_scroll - step
                 } else {
-                    state.move_selection(1);
-                }
-            }
-            Action::SelectLeft => {
-                if browsing {
-                    state.move_browse_selection(-1);
-                }
-            }
-            Action::SelectRight => {
-                if browsing {
-                    state.move_browse_selection(1);
-                }
-            }
-            Action::HalfPageUp | Action::HalfPageDown => {
-                let back = action == Action::HalfPageUp;
-                if browsing {
-                    let viewport = (state.footer_top() - BROWSE_CONTENT_TOP) as f32;
-                    let cell = state
-                        .section_layouts()
-                        .get(state.browse_focus.0)
-                        .map_or(state.grid_cell(), |layout| layout.cell_height)
-                        .max(1);
-                    let rows = ((viewport * 0.5) / cell as f32).max(1.0) as isize;
-                    let jump = rows * columns;
-                    state.move_browse_selection(if back { -jump } else { jump });
-                } else {
-                    let rows = ((state.result_viewport() * 0.5) / state.row_height() as f32)
-                        .max(1.0) as isize;
-                    state.move_selection(if back { -rows } else { rows });
-                }
-            }
-            Action::PageUp | Action::PageDown => {
-                let back = action == Action::PageUp;
-                if browsing {
-                    let viewport = (state.footer_top() - BROWSE_CONTENT_TOP) as f32;
-                    state.scroll_browse(if back {
-                        -viewport * 0.88
-                    } else {
-                        viewport * 0.88
-                    });
-                } else {
-                    let step = state.result_viewport() * 0.88;
-                    state.set_result_scroll_immediate(if back {
-                        state.result_scroll - step
-                    } else {
-                        state.result_scroll + step
-                    });
-                }
+                    state.result_scroll + step
+                });
             }
         }
     }
     true
 }
 
-unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool) -> bool {
+fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool) -> bool {
     if state.capturing_shortcut {
         if key == VK_ESCAPE {
             set_capturing_shortcut(state, false);
             state.status = None;
-            unsafe {
-                let _ = InvalidateRect(Some(state.hwnd), None, false);
-            }
+            invalidate(state.hwnd);
             return true;
         }
         if matches!(key, VK_CONTROL | VK_SHIFT | VK_MENU | VK_LWIN | VK_RWIN) {
             return true;
         }
         if let Some(action) = state.capturing_action {
-            unsafe {
-                apply_captured_binding(state, action, key);
-            }
+            apply_captured_binding(state, action, key);
             return true;
         }
         let modifiers = if state.capture_active {
@@ -3561,10 +3435,8 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
                 state.config.hotkey = hotkey;
                 set_capturing_shortcut(state, false);
                 state.status = None;
-                unsafe {
-                    state.sync_accessible_results();
-                    let _ = InvalidateRect(Some(state.hwnd), None, false);
-                }
+                state.sync_accessible_results();
+                invalidate(state.hwnd);
             }
             Err(error) => state.status = Some(error),
         }
@@ -3572,35 +3444,27 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
     }
 
     if key == VK_ESCAPE {
-        unsafe {
-            save_settings(state);
-        }
+        save_settings(state);
         return true;
     }
     if key == VK_RETURN {
-        unsafe {
-            activate_setting(state);
-        }
+        activate_setting(state);
         return true;
     }
     if key == VK_UP || (control && key.0 == VK_K_VALUE) {
         state.settings_selected = state.settings_selected.saturating_sub(1);
         state.selected = state.settings_selected;
         state.ensure_selected_setting_visible();
-        unsafe {
-            state.sync_accessible_results();
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        state.sync_accessible_results();
+        invalidate(state.hwnd);
         return true;
     }
     if key == VK_DOWN || (control && key.0 == VK_J_VALUE) || key == VK_TAB {
         state.settings_selected = (state.settings_selected + 1).min(SETTINGS_ROWS - 1);
         state.selected = state.settings_selected;
         state.ensure_selected_setting_visible();
-        unsafe {
-            state.sync_accessible_results();
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        state.sync_accessible_results();
+        invalidate(state.hwnd);
         return true;
     }
     if key == VK_PRIOR || key == VK_NEXT {
@@ -3612,24 +3476,18 @@ unsafe fn handle_settings_key(state: &mut AppState, key: VIRTUAL_KEY, control: b
         };
         state.selected = state.settings_selected;
         state.ensure_selected_setting_visible();
-        unsafe {
-            state.sync_accessible_results();
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        state.sync_accessible_results();
+        invalidate(state.hwnd);
         return true;
     }
     if key == VK_LEFT || key == VK_RIGHT {
-        unsafe {
-            adjust_setting(state, if key == VK_LEFT { -1 } else { 1 });
-        }
+        adjust_setting(state, if key == VK_LEFT { -1 } else { 1 });
         return true;
     }
     if key.0 == 0x20 && state.settings_selected == SETTINGS_ROWS - 1 {
         set_capturing_shortcut(state, true);
         state.status = Some("Press the new shortcut".to_string());
-        unsafe {
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        invalidate(state.hwnd);
         return true;
     }
     false
@@ -3653,7 +3511,7 @@ fn current_hotkey_modifiers() -> u32 {
     modifiers
 }
 
-unsafe fn commit_selection(state: &mut AppState, close_after: bool) {
+fn commit_selection(state: &mut AppState, close_after: bool) {
     let Some(index) = state.selected_entry_index() else {
         return;
     };
@@ -3661,15 +3519,13 @@ unsafe fn commit_selection(state: &mut AppState, close_after: bool) {
     let text = catalog::toned(&base, state.config.skin_tone)
         .map(str::to_owned)
         .unwrap_or_else(|| base.clone());
-    unsafe {
-        commit_text(state, text, base, close_after);
-    }
+    commit_text(state, text, base, close_after);
 }
 
 /// Put the selection on the clipboard rather than typing it into the target
 /// window. This is the path that still works where injection cannot reach:
 /// an elevated application, or a control that ignores KEYEVENTF_UNICODE.
-unsafe fn copy_selection(state: &mut AppState, close_after: bool) {
+fn copy_selection(state: &mut AppState, close_after: bool) {
     let Some(index) = state.selected_entry_index() else {
         return;
     };
@@ -3677,34 +3533,28 @@ unsafe fn copy_selection(state: &mut AppState, close_after: bool) {
     let text = catalog::toned(&base, state.config.skin_tone)
         .map(str::to_owned)
         .unwrap_or_else(|| base.clone());
-    if let Err(error) = unsafe { set_clipboard_text(state.hwnd, &text) } {
+    if let Err(error) = set_clipboard_text(state.hwnd, &text) {
         eprintln!("winmoji: clipboard write failed: {error}");
         state.status = Some("Could not write to the clipboard.".to_string());
-        unsafe {
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        invalidate(state.hwnd);
         return;
     }
     state.record_use(&base);
     if close_after {
-        unsafe {
-            hide_picker(state);
-        }
+        hide_picker(state);
         state.rebuild_browse_sections();
         return;
     }
     state.status = Some(format!("Copied {text}"));
     state.rebuild_browse_sections_preserving_view();
-    unsafe {
-        state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    state.sync_accessible_results();
+    invalidate(state.hwnd);
 }
 
 /// Replace the clipboard contents with `text`. The clipboard takes ownership
 /// of the moveable global on a successful SetClipboardData, so the handle is
 /// only freed on the paths that never hand it over.
-unsafe fn set_clipboard_text(hwnd: HWND, text: &str) -> Result<()> {
+fn set_clipboard_text(hwnd: HWND, text: &str) -> Result<()> {
     const CF_UNICODETEXT: u32 = 13;
     let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
@@ -3737,26 +3587,22 @@ unsafe fn set_clipboard_text(hwnd: HWND, text: &str) -> Result<()> {
 /// Insert `text` into the captured target; `recent_glyph` is the catalog
 /// entry recorded in recents (the base glyph, so the Recent grid always
 /// shows catalog entries and follows the configured tone).
-unsafe fn commit_text(state: &mut AppState, text: String, recent_glyph: String, close_after: bool) {
+fn commit_text(state: &mut AppState, text: String, recent_glyph: String, close_after: bool) {
     let target = state.target;
     let target_focus = state.target_focus;
     // Capture stays active: the hook passes injected events through, so the
     // send is not re-captured. An insert that keeps the picker open leaves
     // the window exactly where it is.
     if close_after {
-        unsafe {
-            hide_picker(state);
-        }
+        hide_picker(state);
     }
-    match unsafe { inject_unicode(target, target_focus, &text) } {
+    match inject_unicode(target, target_focus, &text) {
         Ok(()) => {
             state.record_use(&recent_glyph);
             if !close_after {
                 state.rebuild_browse_sections_preserving_view();
-                unsafe {
-                    state.sync_accessible_results();
-                    let _ = InvalidateRect(Some(state.hwnd), None, false);
-                }
+                state.sync_accessible_results();
+                invalidate(state.hwnd);
             } else {
                 state.rebuild_browse_sections();
             }
@@ -3766,36 +3612,32 @@ unsafe fn commit_text(state: &mut AppState, text: String, recent_glyph: String, 
             state.status =
                 Some("Could not return to the previous app. Nothing was inserted.".to_string());
             if close_after {
-                unsafe { restore_picker(state) };
+                restore_picker(state);
             } else {
-                unsafe {
-                    let _ = InvalidateRect(Some(state.hwnd), None, false);
-                }
+                invalidate(state.hwnd);
             }
         }
     }
 }
 
-unsafe fn restore_picker(state: &mut AppState) {
-    unsafe {
-        if state.keep_visible {
-            let _ = start_keyboard_capture(state);
-            state.sync_accessible_results();
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-            return;
-        }
-        raise_picker_window(state.hwnd);
-        if GetForegroundWindow() == state.target && start_keyboard_capture(state).is_ok() {
-            arm_focus_watch(state);
-            state.sync_accessible_results();
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        } else {
-            hide_picker(state);
-        }
+fn restore_picker(state: &mut AppState) {
+    if state.keep_visible {
+        let _ = start_keyboard_capture(state);
+        state.sync_accessible_results();
+        invalidate(state.hwnd);
+        return;
+    }
+    raise_picker_window(state.hwnd);
+    if foreground_window() == state.target && start_keyboard_capture(state).is_ok() {
+        arm_focus_watch(state);
+        state.sync_accessible_results();
+        invalidate(state.hwnd);
+    } else {
+        hide_picker(state);
     }
 }
 
-unsafe fn position_near_cursor(state: &mut AppState) {
+fn position_near_cursor(state: &mut AppState) {
     let mut cursor = POINT::default();
     unsafe {
         GetCursorPos(&mut cursor).ok();
@@ -3872,7 +3714,7 @@ fn constrain_dimensions_to_work_area(state: &mut AppState, work_area: &RECT) {
     state.clamp_category_scroll();
 }
 
-unsafe fn resize_window_in_place(state: &mut AppState) {
+fn resize_window_in_place(state: &mut AppState) {
     let mut window = RECT::default();
     if unsafe { GetWindowRect(state.hwnd, &mut window) }.is_err() {
         return;
@@ -3916,13 +3758,13 @@ unsafe fn resize_window_in_place(state: &mut AppState) {
         .ok();
         layout(state);
         state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
+        invalidate(state.hwnd);
     }
     state.clamp_settings_scroll();
     state.clamp_shortcut_scroll();
 }
 
-unsafe fn layout(state: &AppState) {
+fn layout(state: &AppState) {
     let (width, _) = state.dimensions();
     unsafe {
         SetWindowPos(
@@ -3944,18 +3786,14 @@ fn mouse_point_dip(lparam: LPARAM, dpi: u32) -> (f32, f32) {
     (x as f32 * 96.0 / dpi as f32, y as f32 * 96.0 / dpi as f32)
 }
 
-unsafe fn route_wheel(state: &mut AppState, horizontal: bool, wparam: WPARAM, lparam: LPARAM) {
+fn route_wheel(state: &mut AppState, horizontal: bool, wparam: WPARAM, lparam: LPARAM) {
     let notches = ((wparam.0 >> 16) as u16 as i16 as f32) / 120.0;
     if state.view == View::Shortcuts {
-        unsafe {
-            state.set_shortcut_scroll_immediate(state.shortcut_scroll - notches * WHEEL_NOTCH_DIPS);
-        }
+        state.set_shortcut_scroll_immediate(state.shortcut_scroll - notches * WHEEL_NOTCH_DIPS);
         return;
     }
     if state.view == View::Settings {
-        unsafe {
-            state.set_settings_scroll_immediate(state.settings_scroll - notches * WHEEL_NOTCH_DIPS);
-        }
+        state.set_settings_scroll_immediate(state.settings_scroll - notches * WHEEL_NOTCH_DIPS);
         return;
     }
     if state.view != View::Search {
@@ -3964,9 +3802,7 @@ unsafe fn route_wheel(state: &mut AppState, horizontal: bool, wparam: WPARAM, lp
     if !state.browsing() {
         // The result list is a plain row list with no category rail, so the
         // wheel always means the list, in either axis.
-        unsafe {
-            state.set_result_scroll_immediate(state.result_scroll - notches * WHEEL_NOTCH_DIPS);
-        }
+        state.set_result_scroll_immediate(state.result_scroll - notches * WHEEL_NOTCH_DIPS);
         return;
     }
     // Wheel messages carry the cursor position in screen coordinates.
@@ -3981,20 +3817,14 @@ unsafe fn route_wheel(state: &mut AppState, horizontal: bool, wparam: WPARAM, lp
     let over_categories = (CATEGORY_TOP..CATEGORY_TOP + CATEGORY_HEIGHT).contains(&(y as i32));
     if horizontal {
         if over_categories {
-            unsafe {
-                state.scroll_categories(notches * CATEGORY_BUTTON_WIDTH * 2.0);
-            }
+            state.scroll_categories(notches * CATEGORY_BUTTON_WIDTH * 2.0);
         }
     } else if over_categories {
-        unsafe {
-            state.scroll_categories(-notches * CATEGORY_BUTTON_WIDTH * 2.0);
-        }
+        state.scroll_categories(-notches * CATEGORY_BUTTON_WIDTH * 2.0);
     } else {
         // Direct manipulation: the content tracks the wheel 1:1 with no
         // animation between input and pixels.
-        unsafe {
-            state.set_browse_scroll_immediate(state.browse_scroll - notches * WHEEL_NOTCH_DIPS);
-        }
+        state.set_browse_scroll_immediate(state.browse_scroll - notches * WHEEL_NOTCH_DIPS);
     }
 }
 
@@ -4242,7 +4072,7 @@ fn settings_footer_rects(width: i32, footer_top: i32) -> (D2D_RECT_F, D2D_RECT_F
     )
 }
 
-unsafe fn open_tone_picker(state: &mut AppState, x: f32, y: f32) {
+fn open_tone_picker(state: &mut AppState, x: f32, y: f32) {
     if state.view != View::Search {
         return;
     }
@@ -4266,9 +4096,7 @@ unsafe fn open_tone_picker(state: &mut AppState, x: f32, y: f32) {
         anchor_x: x,
         anchor_y: y,
     });
-    unsafe {
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    invalidate(state.hwnd);
 }
 
 const TONE_TILE: f32 = 40.0;
@@ -4447,7 +4275,7 @@ fn hit_test(state: &AppState, x: f32, y: f32) -> Option<HitTarget> {
     }
 }
 
-unsafe fn update_hover(state: &mut AppState, x: f32, y: f32) {
+fn update_hover(state: &mut AppState, x: f32, y: f32) {
     let target = hit_test(state, x, y);
     let entry = match target {
         Some(HitTarget::SearchResult(row)) => state.matches.get(row).map(|found| found.index),
@@ -4461,16 +4289,14 @@ unsafe fn update_hover(state: &mut AppState, x: f32, y: f32) {
     if target != state.hovered_target || entry != state.hovered_entry {
         state.hovered_target = target;
         state.hovered_entry = entry;
-        unsafe {
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        invalidate(state.hwnd);
     }
 }
 
 /// Resize the window to follow the cursor while the corner grip is dragged.
 /// The picker draws its own frame, so sizing is done here rather than by
 /// handing the system a resize border it would draw over.
-unsafe fn update_dragged_resize(state: &mut AppState) {
+fn update_dragged_resize(state: &mut AppState) {
     let Some((offset_x, offset_y)) = state.dragging_resize else {
         return;
     };
@@ -4510,7 +4336,7 @@ unsafe fn update_dragged_resize(state: &mut AppState) {
     state.needs_render = true;
 }
 
-unsafe fn update_dragged_slider(state: &mut AppState, x: f32) {
+fn update_dragged_slider(state: &mut AppState, x: f32) {
     let Some(index) = state.dragging_slider else {
         return;
     };
@@ -4527,19 +4353,15 @@ unsafe fn update_dragged_slider(state: &mut AppState, x: f32) {
             // The text size takes effect as it is dragged; width and height
             // wait for the drag to end because they resize the window.
             let steps = (value - state.config.font_scale) / FONT_SCALE_STEP;
-            unsafe {
-                adjust_font_scale(state, steps);
-            }
+            adjust_font_scale(state, steps);
         }
         _ => return,
     }
-    unsafe {
-        state.sync_accessible_results();
-        let _ = InvalidateRect(Some(state.hwnd), None, false);
-    }
+    state.sync_accessible_results();
+    invalidate(state.hwnd);
 }
 
-unsafe fn update_dragged_scrollbar(state: &mut AppState, y: f32) {
+fn update_dragged_scrollbar(state: &mut AppState, y: f32) {
     let Some(offset) = state.dragging_scrollbar else {
         return;
     };
@@ -4550,20 +4372,18 @@ unsafe fn update_dragged_scrollbar(state: &mut AppState, y: f32) {
     let available = (track.bottom - track.top - thumb_height).max(1.0);
     let thumb_top = (y - offset).clamp(track.top, track.bottom - thumb_height);
     let ratio = (thumb_top - track.top) / available;
-    unsafe {
-        if state.view == View::Shortcuts {
-            state.set_shortcut_scroll_immediate(ratio * state.maximum_shortcut_scroll());
-        } else if state.view == View::Settings {
-            state.set_settings_scroll_immediate(ratio * state.maximum_settings_scroll());
-        } else if state.browsing() {
-            state.set_browse_scroll_immediate(ratio * state.maximum_browse_scroll());
-        } else {
-            state.set_result_scroll_immediate(ratio * state.maximum_result_scroll());
-        }
+    if state.view == View::Shortcuts {
+        state.set_shortcut_scroll_immediate(ratio * state.maximum_shortcut_scroll());
+    } else if state.view == View::Settings {
+        state.set_settings_scroll_immediate(ratio * state.maximum_settings_scroll());
+    } else if state.browsing() {
+        state.set_browse_scroll_immediate(ratio * state.maximum_browse_scroll());
+    } else {
+        state.set_result_scroll_immediate(ratio * state.maximum_result_scroll());
     }
 }
 
-unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
+fn handle_click(state: &mut AppState, x: f32, y: f32) {
     let target = hit_test(state, x, y);
     if state.tone_picker.is_some()
         && !matches!(
@@ -4572,45 +4392,33 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
         )
     {
         state.tone_picker = None;
-        unsafe {
-            let _ = InvalidateRect(Some(state.hwnd), None, false);
-        }
+        invalidate(state.hwnd);
         return;
     }
     let Some(target) = target else {
         return;
     };
     match target {
-        HitTarget::Close if state.view == View::Settings => unsafe { save_settings(state) },
-        HitTarget::Close => unsafe { hide_picker(state) },
-        HitTarget::Settings => unsafe { enter_settings(state) },
-        HitTarget::Browse => unsafe { focus_browser(state) },
+        HitTarget::Close if state.view == View::Settings => save_settings(state),
+        HitTarget::Close => hide_picker(state),
+        HitTarget::Settings => enter_settings(state),
+        HitTarget::Browse => focus_browser(state),
         HitTarget::SearchClear => {
             state.search.clear();
-            unsafe {
-                state.update_results();
-            }
+            state.update_results();
         }
-        HitTarget::Category(index) => unsafe { state.jump_to_category(index) },
-        HitTarget::CategoryScrollLeft => unsafe {
-            state.scroll_categories(-CATEGORY_BUTTON_WIDTH * 2.0)
-        },
-        HitTarget::CategoryScrollRight => unsafe {
-            state.scroll_categories(CATEGORY_BUTTON_WIDTH * 2.0)
-        },
+        HitTarget::Category(index) => state.jump_to_category(index),
+        HitTarget::CategoryScrollLeft => state.scroll_categories(-CATEGORY_BUTTON_WIDTH * 2.0),
+        HitTarget::CategoryScrollRight => state.scroll_categories(CATEGORY_BUTTON_WIDTH * 2.0),
         HitTarget::SearchResult(row) => {
             state.selected = row;
-            unsafe {
-                state.sync_accessible_results();
-                commit_selection(state, false);
-            }
+            state.sync_accessible_results();
+            commit_selection(state, false);
         }
         HitTarget::BrowseItem { section, item } => {
             state.browse_focus = (section, item);
-            unsafe {
-                state.sync_accessible_results();
-                commit_selection(state, false);
-            }
+            state.sync_accessible_results();
+            commit_selection(state, false);
         }
         HitTarget::Scrollbar => {
             if let Some((_, thumb)) = list_scrollbar_rects(state) {
@@ -4627,12 +4435,10 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
         }
         HitTarget::ShiftCap => {
             state.shift_latched = !state.shift_latched;
-            unsafe {
-                let _ = InvalidateRect(Some(state.hwnd), None, false);
-            }
+            invalidate(state.hwnd);
         }
-        HitTarget::Copy => unsafe { copy_selection(state, !state.keep_open()) },
-        HitTarget::Insert => unsafe { commit_selection(state, !state.keep_open()) },
+        HitTarget::Copy => copy_selection(state, !state.keep_open()),
+        HitTarget::Insert => commit_selection(state, !state.keep_open()),
         HitTarget::TonePopup => {}
         HitTarget::ToneOption(index) => {
             if let Some(picker) = state.tone_picker.take() {
@@ -4641,28 +4447,20 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
                 let text = catalog::toned(&base, tone)
                     .map(str::to_owned)
                     .unwrap_or_else(|| base.clone());
-                unsafe {
-                    commit_text(state, text, base, false);
-                }
+                commit_text(state, text, base, false);
             }
         }
         HitTarget::SettingRow(index) => {
             state.settings_selected = index;
             state.selected = index;
             if setting_is_action(index) {
-                unsafe {
-                    activate_setting(state);
-                }
+                activate_setting(state);
             } else if index >= 2 && x >= state.dimensions().0 as f32 * 0.42 {
                 let midpoint = state.dimensions().0 as f32 * 0.7;
-                unsafe {
-                    adjust_setting(state, if x < midpoint { -1 } else { 1 });
-                }
+                adjust_setting(state, if x < midpoint { -1 } else { 1 });
             }
-            unsafe {
-                state.sync_accessible_results();
-                let _ = InvalidateRect(Some(state.hwnd), None, false);
-            }
+            state.sync_accessible_results();
+            invalidate(state.hwnd);
         }
         HitTarget::SettingSlider(index) => {
             state.dragging_slider = Some(index);
@@ -4674,12 +4472,10 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
         HitTarget::ShortcutRow(index) => {
             state.shortcut_selected = index.min(Action::ALL.len() - 1);
             let action = Action::ALL[state.shortcut_selected];
-            unsafe {
-                begin_capture(state, action);
-            }
+            begin_capture(state, action);
         }
-        HitTarget::ShortcutsReset => unsafe { reset_shortcuts(state) },
-        HitTarget::ShortcutsBack => unsafe { leave_shortcuts(state) },
+        HitTarget::ShortcutsReset => reset_shortcuts(state),
+        HitTarget::ShortcutsBack => leave_shortcuts(state),
         HitTarget::ResizeGrip => {
             let mut cursor = POINT::default();
             let mut window = RECT::default();
@@ -4692,9 +4488,9 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
                 }
             }
         }
-        HitTarget::SettingsDiscard => unsafe { discard_settings(state) },
-        HitTarget::SettingsReset => unsafe { reset_settings(state) },
-        HitTarget::SettingsBack => unsafe { save_settings(state) },
+        HitTarget::SettingsDiscard => discard_settings(state),
+        HitTarget::SettingsReset => reset_settings(state),
+        HitTarget::SettingsBack => save_settings(state),
     }
 }
 
@@ -4702,7 +4498,7 @@ unsafe fn handle_click(state: &mut AppState, x: f32, y: f32) {
 /// happens once per display refresh in the message loop: presenting straight
 /// from here would put one present on the queue per input event, which the
 /// driver has to buffer.
-unsafe fn paint(state: &mut AppState) {
+fn paint(state: &mut AppState) {
     let mut paint = PAINTSTRUCT::default();
     unsafe {
         BeginPaint(state.hwnd, &mut paint);
@@ -4714,8 +4510,8 @@ unsafe fn paint(state: &mut AppState) {
 /// Wait for the compositor to accept a frame, then draw and present one.
 /// Every present in the process goes through here, so the frame-latency
 /// waitable object is always honoured.
-unsafe fn render_frame(state: &mut AppState) {
-    if unsafe { ensure_render_target(state) }.is_err() {
+fn render_frame(state: &mut AppState) {
+    if ensure_render_target(state).is_err() {
         state.needs_render = false;
         return;
     }
@@ -4725,9 +4521,7 @@ unsafe fn render_frame(state: &mut AppState) {
         }
     }
     state.needs_render = false;
-    unsafe {
-        render_and_present(state);
-    }
+    render_and_present(state);
 }
 
 /// Build the device stack: D3D11 device, DXGI flip-model swap chain with a
@@ -4735,7 +4529,7 @@ unsafe fn render_frame(state: &mut AppState) {
 /// back buffer. Flip-model presentation hands frames to the compositor
 /// without a copy, and the waitable object lets the animation loop pace
 /// itself to the monitor refresh rate instead of a coarse timer.
-unsafe fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> {
+fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> {
     if let Some(resources) = &state.render {
         return Ok(resources.clone());
     }
@@ -4822,11 +4616,9 @@ unsafe fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> 
     let frame_gate = Rc::new(FrameLatencyGate(unsafe {
         swapchain.GetFrameLatencyWaitableObject()
     }));
-    unsafe {
-        attach_swapchain_target(&context, &swapchain, state.dpi)?;
-    }
+    attach_swapchain_target(&context, &swapchain, state.dpi)?;
     let target: ID2D1RenderTarget = context.cast()?;
-    let brushes = unsafe { create_brushes(&target)? };
+    let brushes = create_brushes(&target)?;
     let resources = RenderResources {
         target,
         context,
@@ -4844,7 +4636,7 @@ unsafe fn ensure_render_target(state: &mut AppState) -> Result<RenderResources> 
 }
 
 /// Point the device context at the swap chain's current back buffer.
-unsafe fn attach_swapchain_target(
+fn attach_swapchain_target(
     context: &ID2D1DeviceContext,
     swapchain: &IDXGISwapChain2,
     dpi: u32,
@@ -4869,7 +4661,7 @@ unsafe fn attach_swapchain_target(
 
 /// Resize the swap chain to the current client area, keeping the device and
 /// the glyph cache alive; only the back-buffer binding is rebuilt.
-unsafe fn resize_swapchain(state: &mut AppState) {
+fn resize_swapchain(state: &mut AppState) {
     let Some(resources) = state.render.clone() else {
         return;
     };
@@ -4904,8 +4696,8 @@ unsafe fn resize_swapchain(state: &mut AppState) {
 /// Draw the current view and hand the frame to the compositor. Present(1)
 /// queues at most one frame (SetMaximumFrameLatency), so this never blocks
 /// the thread for more than a frame even without the waitable gate.
-unsafe fn render_and_present(state: &mut AppState) {
-    if let Err(error) = unsafe { draw_picker(state) } {
+fn render_and_present(state: &mut AppState) {
+    if let Err(error) = draw_picker(state) {
         state.render = None;
         eprintln!("winmoji: rendering failed: {error}");
         return;
@@ -4915,9 +4707,7 @@ unsafe fn render_and_present(state: &mut AppState) {
         if presented.is_err() {
             // Device removed or reset: rebuild the stack on the next frame.
             state.render = None;
-            unsafe {
-                let _ = InvalidateRect(Some(state.hwnd), None, false);
-            }
+            invalidate(state.hwnd);
         }
     }
 }
@@ -4925,8 +4715,8 @@ unsafe fn render_and_present(state: &mut AppState) {
 /// One vsync-paced animation frame: wait until the compositor can take a new
 /// frame, advance the scroll by the elapsed wall-clock time, and render. The
 /// wait is bounded so a stalled compositor never wedges the loop.
-unsafe fn render_animation_frame(state: &mut AppState) {
-    if unsafe { ensure_render_target(state) }.is_err() {
+fn render_animation_frame(state: &mut AppState) {
+    if ensure_render_target(state).is_err() {
         // No device: snap to the destination instead of spinning.
         state.browse_scroll = state.browse_scroll_target;
         state.last_frame = None;
@@ -4937,11 +4727,9 @@ unsafe fn render_animation_frame(state: &mut AppState) {
         now.duration_since(last).as_secs_f32().clamp(0.001, 0.05)
     });
     state.last_frame = Some(now);
-    unsafe {
-        state.tick_browse_scroll(dt);
-        state.tick_scrollbar_grip(dt);
-        render_frame(state);
-    }
+    state.tick_browse_scroll(dt);
+    state.tick_scrollbar_grip(dt);
+    render_frame(state);
 }
 
 fn glyph_key(state: &AppState, entry_index: usize) -> (usize, u8) {
@@ -4974,12 +4762,12 @@ fn glyph_slot(
 /// page shares a single BeginDraw/EndDraw pair, so the GPU round trip that
 /// dominates the cost is paid once per batch rather than once per glyph.
 /// Only ever called from the idle warmer.
-unsafe fn rasterize_batch(state: &AppState, resources: &RenderResources, batch: &[usize]) {
+fn rasterize_batch(state: &AppState, resources: &RenderResources, batch: &[usize]) {
     let mut atlas = resources.atlas.borrow_mut();
     let mut position = 0;
     while position < batch.len() {
         if atlas.last().is_none_or(|page| page.used >= ATLAS_SLOTS) {
-            match unsafe { create_atlas_page(&resources.target) } {
+            match create_atlas_page(&resources.target) {
                 Ok(page) => atlas.push(page),
                 Err(_) => return,
             }
@@ -5025,7 +4813,7 @@ unsafe fn rasterize_batch(state: &AppState, resources: &RenderResources, batch: 
 }
 
 /// True when a message is already waiting, so warming can yield instantly.
-unsafe fn input_pending() -> bool {
+fn input_pending() -> bool {
     let mut message = MSG::default();
     unsafe { PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE) }.as_bool()
 }
@@ -5061,12 +4849,12 @@ enum WarmOutcome {
 /// Rasterize a bounded slice of missing glyphs during idle time. The slice
 /// is capped by wall clock and abandoned the instant a message arrives, so
 /// rasterization can never delay input by more than a single glyph.
-unsafe fn warm_glyph_slice(state: &mut AppState) -> WarmOutcome {
+fn warm_glyph_slice(state: &mut AppState) -> WarmOutcome {
     if state.config.emoji_font != EmojiFont::SegoeEmoji {
         return WarmOutcome::Done;
     }
     let visible = unsafe { IsWindowVisible(state.hwnd) }.as_bool();
-    let Ok(resources) = (unsafe { ensure_render_target(state) }) else {
+    let Ok(resources) = ensure_render_target(state) else {
         return WarmOutcome::Done;
     };
     let slice = Duration::from_millis(if visible {
@@ -5078,12 +4866,10 @@ unsafe fn warm_glyph_slice(state: &mut AppState) -> WarmOutcome {
     let mut warmed = 0usize;
     let cold = cold_glyphs(state, &resources);
     for batch in cold.chunks(ATLAS_BATCH) {
-        if started.elapsed() >= slice || unsafe { input_pending() } {
+        if started.elapsed() >= slice || input_pending() {
             break;
         }
-        unsafe {
-            rasterize_batch(state, &resources, batch);
-        }
+        rasterize_batch(state, &resources, batch);
         warmed += batch.len();
     }
     if warmed == 0 {
@@ -5095,18 +4881,18 @@ unsafe fn warm_glyph_slice(state: &mut AppState) -> WarmOutcome {
     WarmOutcome::Worked
 }
 
-unsafe fn draw_picker(state: &mut AppState) -> Result<()> {
+fn draw_picker(state: &mut AppState) -> Result<()> {
     match state.view {
-        View::Search => unsafe { draw_search_picker(state) },
-        View::Settings => unsafe { draw_settings_picker(state) },
-        View::Shortcuts => unsafe { draw_shortcuts_picker(state) },
+        View::Search => draw_search_picker(state),
+        View::Settings => draw_settings_picker(state),
+        View::Shortcuts => draw_shortcuts_picker(state),
     }
 }
 
 /// Every action and the chord that runs it, one row each. The list scrolls
 /// because it is longer than the shortest allowed window.
-unsafe fn draw_shortcuts_picker(state: &mut AppState) -> Result<()> {
-    let resources = unsafe { ensure_render_target(state)? };
+fn draw_shortcuts_picker(state: &mut AppState) -> Result<()> {
+    let resources = ensure_render_target(state)?;
     let target = resources.target.clone();
     let brushes = resources.brushes.clone();
     let (width, height) = state.dimensions();
@@ -5254,8 +5040,8 @@ unsafe fn draw_shortcuts_picker(state: &mut AppState) -> Result<()> {
     Ok(())
 }
 
-unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
-    let resources = unsafe { ensure_render_target(state)? };
+fn draw_search_picker(state: &mut AppState) -> Result<()> {
+    let resources = ensure_render_target(state)?;
     resources.wanted.borrow_mut().clear();
     let target = resources.target.clone();
     let brushes = resources.brushes.clone();
@@ -5360,32 +5146,28 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
     }
 
     if state.browsing() {
-        unsafe {
-            draw_browser(
-                state,
-                &resources,
-                &brushes.surface_border,
-                &brushes.selection,
-                &brushes.selection_border,
-                &brushes.glyph_surface,
-                &brushes.primary,
-                &brushes.secondary,
-                &brushes.accent,
-            );
-        }
+        draw_browser(
+            state,
+            &resources,
+            &brushes.surface_border,
+            &brushes.selection,
+            &brushes.selection_border,
+            &brushes.glyph_surface,
+            &brushes.primary,
+            &brushes.secondary,
+            &brushes.accent,
+        );
     } else {
-        unsafe {
-            draw_search_results(
-                state,
-                &resources,
-                &brushes.selection,
-                &brushes.selection_border,
-                &brushes.glyph_surface,
-                &brushes.primary,
-                &brushes.secondary,
-                &brushes.accent,
-            );
-        }
+        draw_search_results(
+            state,
+            &resources,
+            &brushes.selection,
+            &brushes.selection_border,
+            &brushes.glyph_surface,
+            &brushes.primary,
+            &brushes.secondary,
+            &brushes.accent,
+        );
     }
 
     unsafe {
@@ -5455,7 +5237,7 @@ unsafe fn draw_search_picker(state: &mut AppState) -> Result<()> {
 /// Draw the query text, selection highlight, and caret. The picker never
 /// activates, so no native control could ever show a caret here; the field
 /// is rendered directly instead.
-unsafe fn draw_search_text(
+fn draw_search_text(
     state: &mut AppState,
     target: &ID2D1RenderTarget,
     brushes: &Brushes,
@@ -5466,16 +5248,14 @@ unsafe fn draw_search_text(
     let top = SEARCH_TOP as f32 + 4.0;
     let bottom = (SEARCH_TOP + SEARCH_HEIGHT) as f32 - 4.0;
     if state.search.text.is_empty() {
-        unsafe {
-            draw_text(
-                target,
-                "Search names, symbols, or code points",
-                &state.formats.search,
-                rect(text_left, top, text_right, bottom),
-                &brushes.secondary,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-            );
-        }
+        draw_text(
+            target,
+            "Search names, symbols, or code points",
+            &state.formats.search,
+            rect(text_left, top, text_right, bottom),
+            &brushes.secondary,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+        );
         return Ok(());
     }
 
@@ -5488,7 +5268,7 @@ unsafe fn draw_search_text(
     let utf16_offset = |byte_offset: usize| -> u32 {
         state.search.text[..byte_offset].encode_utf16().count() as u32
     };
-    let caret_x = unsafe { layout_caret_x(&layout, utf16_offset(state.search.caret))? };
+    let caret_x = layout_caret_x(&layout, utf16_offset(state.search.caret))?;
     let visible = (text_right - text_left).max(8.0);
     if caret_x - state.search.scroll > visible - 2.0 {
         state.search.scroll = caret_x - visible + 2.0;
@@ -5546,7 +5326,7 @@ unsafe fn draw_search_text(
     Ok(())
 }
 
-unsafe fn layout_caret_x(layout: &IDWriteTextLayout, position: u32) -> Result<f32> {
+fn layout_caret_x(layout: &IDWriteTextLayout, position: u32) -> Result<f32> {
     let mut x = 0.0f32;
     let mut y = 0.0f32;
     let mut metrics = DWRITE_HIT_TEST_METRICS::default();
@@ -5557,7 +5337,7 @@ unsafe fn layout_caret_x(layout: &IDWriteTextLayout, position: u32) -> Result<f3
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn draw_browser(
+fn draw_browser(
     state: &AppState,
     resources: &RenderResources,
     border: &ID2D1SolidColorBrush,
@@ -5637,32 +5417,30 @@ unsafe fn draw_browser(
         target.PopAxisAlignedClip();
     }
     if let Some((left, right)) = category_edge_rects(width) {
-        unsafe {
-            draw_text(
-                target,
-                "<",
-                &state.formats.center_title,
-                left,
-                if state.category_scroll > 0.0 {
-                    secondary
-                } else {
-                    border
-                },
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-            draw_text(
-                target,
-                ">",
-                &state.formats.center_title,
-                right,
-                if state.category_scroll < maximum_category_scroll(width) {
-                    secondary
-                } else {
-                    border
-                },
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-        }
+        draw_text(
+            target,
+            "<",
+            &state.formats.center_title,
+            left,
+            if state.category_scroll > 0.0 {
+                secondary
+            } else {
+                border
+            },
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+        draw_text(
+            target,
+            ">",
+            &state.formats.center_title,
+            right,
+            if state.category_scroll < maximum_category_scroll(width) {
+                secondary
+            } else {
+                border
+            },
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
     }
     unsafe {
         target.PushAxisAlignedClip(
@@ -5685,21 +5463,19 @@ unsafe fn draw_browser(
         if heading_y + SECTION_HEADING_HEIGHT as f32 >= BROWSE_CONTENT_TOP as f32
             && heading_y < state.footer_top() as f32
         {
-            unsafe {
-                draw_text(
-                    target,
-                    section.category.heading(),
-                    &state.formats.label,
-                    rect(
-                        18.0,
-                        heading_y,
-                        width as f32 - 18.0,
-                        heading_y + SECTION_HEADING_HEIGHT as f32,
-                    ),
-                    secondary,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
-            }
+            draw_text(
+                target,
+                section.category.heading(),
+                &state.formats.label,
+                rect(
+                    18.0,
+                    heading_y,
+                    width as f32 - 18.0,
+                    heading_y + SECTION_HEADING_HEIGHT as f32,
+                ),
+                secondary,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
         }
         let grid_width = layout.columns as f32 * layout.cell_width;
         let grid_left = (width as f32 - grid_width) / 2.0;
@@ -5763,7 +5539,7 @@ unsafe fn draw_browser(
 /// lit exactly when the actions are in their keep-open form, so holding
 /// Shift visibly moves it and the labels together. Clicking it latches the
 /// same state for people who never find the key.
-unsafe fn draw_shift_cap(
+fn draw_shift_cap(
     state: &AppState,
     target: &ID2D1RenderTarget,
     bounds: D2D_RECT_F,
@@ -5809,7 +5585,7 @@ unsafe fn draw_shift_cap(
 
 /// Draw the scrollbar for whichever list is on screen. The grip carries both
 /// the hover colour and the eased width, so the two read as one response.
-unsafe fn draw_list_scrollbar(state: &AppState, resources: &RenderResources) {
+fn draw_list_scrollbar(state: &AppState, resources: &RenderResources) {
     let Some((track, thumb)) = list_scrollbar_rects(state) else {
         return;
     };
@@ -5846,7 +5622,7 @@ unsafe fn draw_list_scrollbar(state: &AppState, resources: &RenderResources) {
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn draw_search_results(
+fn draw_search_results(
     state: &AppState,
     resources: &RenderResources,
     selection: &ID2D1SolidColorBrush,
@@ -5947,29 +5723,27 @@ unsafe fn draw_search_results(
             "No matching character".to_string()
         };
         let center_y = (SEARCH_RESULTS_TOP as f32 + state.footer_top() as f32) / 2.0;
-        unsafe {
-            draw_text(
-                target,
-                &headline,
-                &state.formats.center_title,
-                rect(24.0, center_y - 28.0, width as f32 - 24.0, center_y),
-                primary,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-            draw_text(
-                target,
-                "Try fewer letters, or click the grid to browse",
-                &state.formats.center,
-                rect(24.0, center_y + 2.0, width as f32 - 24.0, center_y + 28.0),
-                secondary,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-        }
+        draw_text(
+            target,
+            &headline,
+            &state.formats.center_title,
+            rect(24.0, center_y - 28.0, width as f32 - 24.0, center_y),
+            primary,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+        draw_text(
+            target,
+            "Try fewer letters, or click the grid to browse",
+            &state.formats.center,
+            rect(24.0, center_y + 2.0, width as f32 - 24.0, center_y + 28.0),
+            secondary,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
     }
 }
 
-unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
-    let resources = unsafe { ensure_render_target(state)? };
+fn draw_settings_picker(state: &mut AppState) -> Result<()> {
+    let resources = ensure_render_target(state)?;
     let target = resources.target.clone();
     let brushes = resources.brushes.clone();
     let (width, height) = state.dimensions();
@@ -6051,43 +5825,41 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
                 );
             }
         }
-        unsafe {
-            draw_text(
+        draw_text(
+            &target,
+            label,
+            &state.formats.label,
+            rect(24.0, bounds.top, width as f32 * 0.44, bounds.bottom),
+            &primary,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+        if let Some((current, minimum, maximum)) = slider_bounds(state.config, index) {
+            draw_slider(
                 &target,
-                label,
-                &state.formats.label,
-                rect(24.0, bounds.top, width as f32 * 0.44, bounds.bottom),
+                slider_rect(width, index, state.settings_scroll),
+                current,
+                minimum,
+                maximum,
+                value,
+                &selection_border,
+                &accent,
                 &primary,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                &state.formats.metadata,
             );
-            if let Some((current, minimum, maximum)) = slider_bounds(state.config, index) {
-                draw_slider(
-                    &target,
-                    slider_rect(width, index, state.settings_scroll),
-                    current,
-                    minimum,
-                    maximum,
-                    value,
-                    &selection_border,
-                    &accent,
-                    &primary,
-                    &state.formats.metadata,
-                );
-            } else {
-                draw_setting_value(
-                    state,
-                    &target,
-                    &brushes,
-                    index,
-                    value,
-                    rect(
-                        width as f32 * 0.42,
-                        bounds.top,
-                        width as f32 - 24.0,
-                        bounds.bottom,
-                    ),
-                );
-            }
+        } else {
+            draw_setting_value(
+                state,
+                &target,
+                &brushes,
+                index,
+                value,
+                rect(
+                    width as f32 * 0.42,
+                    bounds.top,
+                    width as f32 - 24.0,
+                    bounds.bottom,
+                ),
+            );
         }
     }
 
@@ -6172,7 +5944,7 @@ unsafe fn draw_settings_picker(state: &mut AppState) -> Result<()> {
     Ok(())
 }
 
-unsafe fn draw_header_button(
+fn draw_header_button(
     target: &ID2D1RenderTarget,
     state: &AppState,
     width: i32,
@@ -6206,7 +5978,7 @@ unsafe fn draw_header_button(
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn draw_button(
+fn draw_button(
     target: &ID2D1RenderTarget,
     bounds: D2D_RECT_F,
     label: &str,
@@ -6246,7 +6018,7 @@ const PREVIEW_GLYPH: &str = "👋";
 /// rendered as it will appear, the emoji font and skin tone are shown on a
 /// sample glyph.
 #[allow(clippy::too_many_arguments)]
-unsafe fn draw_setting_value(
+fn draw_setting_value(
     state: &AppState,
     target: &ID2D1RenderTarget,
     brushes: &Brushes,
@@ -6257,24 +6029,22 @@ unsafe fn draw_setting_value(
     let primary = &brushes.primary;
     let secondary = &brushes.secondary;
     let selection_border = &brushes.selection_border;
-    unsafe {
-        draw_text(
-            target,
-            "‹",
-            &state.formats.brand,
-            rect(bounds.left, bounds.top, bounds.left + 14.0, bounds.bottom),
-            secondary,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-        );
-        draw_text(
-            target,
-            "›",
-            &state.formats.brand,
-            rect(bounds.right - 14.0, bounds.top, bounds.right, bounds.bottom),
-            secondary,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-        );
-    }
+    draw_text(
+        target,
+        "‹",
+        &state.formats.brand,
+        rect(bounds.left, bounds.top, bounds.left + 14.0, bounds.bottom),
+        secondary,
+        D2D1_DRAW_TEXT_OPTIONS_NONE,
+    );
+    draw_text(
+        target,
+        "›",
+        &state.formats.brand,
+        rect(bounds.right - 14.0, bounds.top, bounds.right, bounds.bottom),
+        secondary,
+        D2D1_DRAW_TEXT_OPTIONS_NONE,
+    );
     let inner = rect(
         bounds.left + 16.0,
         bounds.top,
@@ -6322,7 +6092,7 @@ unsafe fn draw_setting_value(
             );
         },
         // Emoji font: the same glyphs under the chosen face.
-        4 => unsafe {
+        4 => {
             let sample = rect(inner.left, inner.top, inner.left + 74.0, inner.bottom);
             draw_text(
                 target,
@@ -6344,7 +6114,7 @@ unsafe fn draw_setting_value(
                 secondary,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
             );
-        },
+        }
         // Skin tone: every tone on one glyph, the active one ringed.
         5 => {
             let step = ((inner.right - inner.left) / SkinTone::ALL.len() as f32).min(26.0);
@@ -6364,19 +6134,17 @@ unsafe fn draw_setting_value(
                     }
                 }
                 let toned = catalog::toned(PREVIEW_GLYPH, *tone).unwrap_or(PREVIEW_GLYPH);
-                unsafe {
-                    draw_text(
-                        target,
-                        toned,
-                        &state.formats.glyph_small,
-                        cell,
-                        primary,
-                        D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
-                    );
-                }
+                draw_text(
+                    target,
+                    toned,
+                    &state.formats.glyph_small,
+                    cell,
+                    primary,
+                    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+                );
             }
         }
-        _ => unsafe {
+        _ => {
             draw_text(
                 target,
                 value,
@@ -6385,7 +6153,7 @@ unsafe fn draw_setting_value(
                 secondary,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
             );
-        },
+        }
     }
 }
 
@@ -6413,7 +6181,7 @@ fn preview_details_line(state: &AppState) -> String {
 
 /// Three stacked diagonals in the bottom-right corner marking the drag
 /// handle, brighter while hovered or dragging.
-unsafe fn draw_resize_grip(state: &AppState, target: &ID2D1RenderTarget, brushes: &Brushes) {
+fn draw_resize_grip(state: &AppState, target: &ID2D1RenderTarget, brushes: &Brushes) {
     let grip = resize_grip_rect(state);
     let active = matches!(state.hovered_target, Some(HitTarget::ResizeGrip))
         || state.dragging_resize.is_some();
@@ -6442,7 +6210,7 @@ unsafe fn draw_resize_grip(state: &AppState, target: &ID2D1RenderTarget, brushes
     }
 }
 
-unsafe fn draw_tone_picker(state: &AppState, target: &ID2D1RenderTarget, brushes: &Brushes) {
+fn draw_tone_picker(state: &AppState, target: &ID2D1RenderTarget, brushes: &Brushes) {
     let Some(picker) = &state.tone_picker else {
         return;
     };
@@ -6503,7 +6271,7 @@ unsafe fn draw_tone_picker(state: &AppState, target: &ID2D1RenderTarget, brushes
     }
 }
 
-unsafe fn draw_hover_help(
+fn draw_hover_help(
     state: &AppState,
     target: &ID2D1RenderTarget,
     surface: &ID2D1SolidColorBrush,
@@ -6600,7 +6368,7 @@ unsafe fn draw_hover_help(
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn draw_slider(
+fn draw_slider(
     target: &ID2D1RenderTarget,
     bounds: D2D_RECT_F,
     value: i32,
@@ -6666,7 +6434,7 @@ unsafe fn draw_slider(
     }
 }
 
-unsafe fn draw_glyph(
+fn draw_glyph(
     state: &AppState,
     resources: &RenderResources,
     entry_index: usize,
@@ -6715,16 +6483,14 @@ unsafe fn draw_glyph(
         } else {
             &state.formats.emoticon_small
         };
-        unsafe {
-            draw_text(
-                target,
-                &entry.glyph,
-                format,
-                bounds,
-                brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-            );
-        }
+        draw_text(
+            target,
+            &entry.glyph,
+            format,
+            bounds,
+            brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+        );
         return;
     }
     let mathematical_alphanumeric = entry
@@ -6744,45 +6510,39 @@ unsafe fn draw_glyph(
     } else {
         D2D1_DRAW_TEXT_OPTIONS_NONE
     };
-    unsafe {
-        draw_text(target, &entry.glyph, format, bounds, brush, options);
-    }
+    draw_text(target, &entry.glyph, format, bounds, brush, options);
 }
 
-unsafe fn draw_entry_information(
+fn draw_entry_information(
     state: &AppState,
     target: &ID2D1RenderTarget,
     bounds: D2D_RECT_F,
     brush: &ID2D1SolidColorBrush,
 ) {
     let Some(index) = state.hover_or_selected_entry() else {
-        unsafe {
-            draw_text(
-                target,
-                "Type to search or scroll to browse",
-                &state.formats.center,
-                bounds,
-                brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-        }
+        draw_text(
+            target,
+            "Type to search or scroll to browse",
+            &state.formats.center,
+            bounds,
+            brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
         return;
     };
     let entry = &catalog::entries()[index];
     let detail = detail_line(state.config.details, &entry.name, &entry.glyph, entry.kind);
-    unsafe {
-        draw_text(
-            target,
-            &detail,
-            &state.formats.metadata,
-            bounds,
-            brush,
-            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-        );
-    }
+    draw_text(
+        target,
+        &detail,
+        &state.formats.metadata,
+        bounds,
+        brush,
+        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    );
 }
 
-unsafe fn solid_brush(target: &ID2D1RenderTarget, value: u32) -> Result<ID2D1SolidColorBrush> {
+fn solid_brush(target: &ID2D1RenderTarget, value: u32) -> Result<ID2D1SolidColorBrush> {
     unsafe { target.CreateSolidColorBrush(&color(value), None) }
 }
 
@@ -6812,7 +6572,7 @@ fn rounded_rect(left: f32, top: f32, right: f32, bottom: f32, radius: f32) -> D2
     }
 }
 
-unsafe fn draw_text(
+fn draw_text(
     target: &ID2D1RenderTarget,
     text: &str,
     format: &IDWriteTextFormat,
@@ -6858,7 +6618,7 @@ fn to_wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-unsafe fn focused_child_for(target: HWND) -> HWND {
+fn focused_child_for(target: HWND) -> HWND {
     if target.is_invalid() || !unsafe { IsWindow(Some(target)).as_bool() } {
         return HWND::default();
     }
@@ -6883,7 +6643,7 @@ fn valid_target_focus(target: HWND, focus: HWND) -> bool {
         && (focus == target || unsafe { IsChild(target, focus).as_bool() })
 }
 
-unsafe fn inject_unicode(target: HWND, target_focus: HWND, value: &str) -> Result<()> {
+fn inject_unicode(target: HWND, target_focus: HWND, value: &str) -> Result<()> {
     if target.is_invalid() || !unsafe { IsWindow(Some(target)).as_bool() } {
         return Err(Error::new(
             HRESULT(0x80070006u32 as i32),
@@ -6912,14 +6672,14 @@ unsafe fn inject_unicode(target: HWND, target_focus: HWND, value: &str) -> Resul
         && target_thread != current_thread
         && unsafe { AttachThreadInput(current_thread, target_thread, true).as_bool() };
     let activated =
-        unsafe { GetForegroundWindow() == target || SetForegroundWindow(target).as_bool() };
+        unsafe { foreground_window() == target || SetForegroundWindow(target).as_bool() };
     if valid_target_focus(target, target_focus) {
         unsafe {
             let _ = SetFocus(Some(target_focus));
         }
     }
     for _ in 0..20 {
-        if unsafe { GetForegroundWindow() } == target {
+        if foreground_window() == target {
             break;
         }
         unsafe {
@@ -6931,21 +6691,19 @@ unsafe fn inject_unicode(target: HWND, target_focus: HWND, value: &str) -> Resul
             let _ = AttachThreadInput(current_thread, target_thread, false);
         }
     }
-    if !activated && unsafe { GetForegroundWindow() } != target {
+    if !activated && foreground_window() != target {
         return Err(Error::new(
             HRESULT(0x80070005u32 as i32),
             "Windows did not allow focus restoration; input was cancelled",
         ));
     }
-    if unsafe { GetForegroundWindow() } != target {
+    if foreground_window() != target {
         return Err(Error::new(
             HRESULT(0x80070005u32 as i32),
             "captured window did not regain focus; input was cancelled",
         ));
     }
-    if valid_target_focus(target, target_focus)
-        && unsafe { focused_child_for(target) } != target_focus
-    {
+    if valid_target_focus(target, target_focus) && focused_child_for(target) != target_focus {
         return Err(Error::new(
             HRESULT(0x80070005u32 as i32),
             "captured text control did not regain focus; input was cancelled",
@@ -7181,7 +6939,7 @@ fn self_test() -> Result<()> {
         catalog::entries().len()
     );
 
-    let previous = unsafe { GetForegroundWindow() };
+    let previous = foreground_window();
     let test_window = SelfTestWindow::create()?;
     let edit = test_window.hwnd;
     unsafe {
@@ -7190,13 +6948,13 @@ fn self_test() -> Result<()> {
         if !previous.is_invalid() && IsWindow(Some(previous)).as_bool() {
             let _ = SetForegroundWindow(previous);
             for _ in 0..20 {
-                if GetForegroundWindow() == previous {
+                if foreground_window() == previous {
                     break;
                 }
                 Sleep(10);
             }
         }
-        if !previous.is_invalid() && GetForegroundWindow() != previous {
+        if !previous.is_invalid() && foreground_window() != previous {
             return Err(Error::new(
                 HRESULT(0x80070005u32 as i32),
                 "self-test could not restore the original foreground window",
@@ -7301,7 +7059,7 @@ impl SelfTestWindow {
                 return;
             }
             let _ = UnregisterHotKey(Some(edit), HOTKEY_ID + 1);
-            let foreground = GetForegroundWindow();
+            let foreground = foreground_window();
             let current_thread = GetCurrentThreadId();
             let foreground_thread = if foreground.is_invalid() {
                 0
@@ -7317,7 +7075,7 @@ impl SelfTestWindow {
             if attached {
                 let _ = AttachThreadInput(current_thread, foreground_thread, false);
             }
-            if GetForegroundWindow() != edit {
+            if foreground_window() != edit {
                 let _ = sender.send(Err(
                     "temporary edit control could not obtain foreground focus".to_string(),
                 ));
