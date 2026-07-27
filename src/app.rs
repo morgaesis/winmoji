@@ -34,10 +34,10 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_NO_WRAP,
-    DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteFontFace, IDWriteTextFormat,
-    IDWriteTextLayout,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
+    IDWriteFontFace, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -527,78 +527,33 @@ impl TextFormats {
             EmojiFont::SegoeEmoji => w!("Segoe UI Emoji"),
             EmojiFont::SegoeSymbol => w!("Segoe UI Symbol"),
         };
-        let create_text_format = |factory: &IDWriteFactory, family, size: f32, bold| {
-            create_text_format(factory, family, size * scale, bold)
+        let ui = w!("Segoe UI Variable Text");
+        let symbol_family = w!("Segoe UI Symbol");
+        let format = |family: PCWSTR, size: f32, bold: bool, alignment: DWRITE_TEXT_ALIGNMENT| {
+            create_text_format(factory, family, size * scale, bold, alignment)
         };
-        let glyph = create_text_format(factory, emoji_family, 26.0, false)?;
-        unsafe {
-            glyph.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-        }
-        let glyph_small = create_text_format(factory, emoji_family, 17.0, false)?;
-        unsafe {
-            glyph_small.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-        }
-        let symbol = create_text_format(factory, w!("Segoe UI Symbol"), 23.0, false)?;
-        unsafe {
-            symbol.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-        }
-        let math = create_text_format(factory, w!("Cambria Math"), 22.0, false)?;
-        unsafe {
-            math.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-        }
-        let icon = create_text_format(factory, w!("Segoe UI Symbol"), 14.0, false)?;
-        unsafe {
-            icon.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-        }
-        let center = create_text_format(factory, w!("Segoe UI Variable Text"), 12.0, false)?;
-        unsafe {
-            center.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-        }
-        let center_title = create_text_format(factory, w!("Segoe UI Variable Text"), 16.0, true)?;
-        unsafe {
-            center_title.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-        }
-        let brand = create_text_format(factory, w!("Segoe UI Variable Text"), 10.0, false)?;
-        unsafe {
-            brand.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
-        }
-        let centered = |format: IDWriteTextFormat| -> Result<IDWriteTextFormat> {
-            unsafe {
-                format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-            }
-            Ok(format)
+        let leading = |family: PCWSTR, size: f32, bold: bool| {
+            format(family, size, bold, DWRITE_TEXT_ALIGNMENT_LEADING)
+        };
+        let centered = |family: PCWSTR, size: f32, bold: bool| {
+            format(family, size, bold, DWRITE_TEXT_ALIGNMENT_CENTER)
         };
         Ok(Self {
-            label: create_text_format(factory, w!("Segoe UI Variable Text"), 12.0, true)?,
-            brand,
-            title: create_text_format(factory, w!("Segoe UI Variable Text"), 14.0, true)?,
-            metadata: create_text_format(factory, w!("Segoe UI Variable Text"), 11.0, false)?,
-            search: create_text_format(factory, w!("Segoe UI Variable Text"), 14.0, false)?,
-            glyph,
-            glyph_small,
-            symbol,
-            math,
-            emoticon: centered(create_text_format(
-                factory,
-                w!("Segoe UI Variable Text"),
-                14.0,
-                false,
-            )?)?,
-            emoticon_small: centered(create_text_format(
-                factory,
-                w!("Segoe UI Variable Text"),
-                10.0,
-                false,
-            )?)?,
-            emoticon_icon: centered(create_text_format(
-                factory,
-                w!("Segoe UI Variable Text"),
-                8.0,
-                false,
-            )?)?,
-            icon,
-            center,
-            center_title,
+            label: leading(ui, 12.0, true)?,
+            brand: format(ui, 10.0, false, DWRITE_TEXT_ALIGNMENT_TRAILING)?,
+            title: leading(ui, 14.0, true)?,
+            metadata: leading(ui, 11.0, false)?,
+            search: leading(ui, 14.0, false)?,
+            glyph: centered(emoji_family, 26.0, false)?,
+            glyph_small: centered(emoji_family, 17.0, false)?,
+            symbol: centered(symbol_family, 23.0, false)?,
+            math: centered(w!("Cambria Math"), 22.0, false)?,
+            emoticon: centered(ui, 14.0, false)?,
+            emoticon_small: centered(ui, 10.0, false)?,
+            emoticon_icon: centered(ui, 8.0, false)?,
+            icon: centered(symbol_family, 14.0, false)?,
+            center: centered(ui, 12.0, false)?,
+            center_title: centered(ui, 16.0, true)?,
         })
     }
 }
@@ -608,6 +563,7 @@ fn create_text_format(
     family: PCWSTR,
     size: f32,
     semibold: bool,
+    alignment: DWRITE_TEXT_ALIGNMENT,
 ) -> Result<IDWriteTextFormat> {
     let format = unsafe {
         factory.CreateTextFormat(
@@ -626,7 +582,7 @@ fn create_text_format(
     };
     unsafe {
         format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-        format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
+        format.SetTextAlignment(alignment)?;
         format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
     }
     Ok(format)
