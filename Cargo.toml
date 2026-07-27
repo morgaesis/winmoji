@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "A fast keyboard-first Unicode picker for Windows"
 license = "MIT"
+repository = "https://github.com/morgaesis/winmoji"
 
 [features]
 console = []

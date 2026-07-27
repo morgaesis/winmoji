@@ -64,15 +64,17 @@ The settings panel changes all of these values without editing the file. Enter c
 ## Build and verify
 
 ```text
-cargo +stable-x86_64-pc-windows-msvc test
-cargo +stable-x86_64-pc-windows-msvc clippy --all-targets -- -D warnings
-cargo +stable-x86_64-pc-windows-msvc build --release --target aarch64-pc-windows-msvc --features console
-target\aarch64-pc-windows-msvc\release\winmoji.exe --self-test
-target\aarch64-pc-windows-msvc\release\winmoji.exe --benchmark
-cargo +stable-x86_64-pc-windows-msvc build --release --target aarch64-pc-windows-msvc
+cargo +stable-msvc test
+cargo +stable-msvc clippy --all-targets -- -D warnings
+cargo +stable-msvc build --release --features console
+target\release\winmoji.exe --self-test
+target\release\winmoji.exe --benchmark
+cargo +stable-msvc build --release
 ```
 
-The `console` feature keeps diagnostic output attached to the terminal. `--self-test` needs an interactive desktop session because Windows rejects foreground changes from background runners. The final command produces the default Windows-subsystem binary, so startup and ordinary launches do not create a console window. The MSVC toolchain and Windows SDK must support the selected target. `x86_64-pc-windows-msvc` is also supported.
+WinMoji builds with the MSVC toolchain and a Windows SDK. `stable-msvc` resolves to the host's MSVC toolchain; `rustup default stable-msvc` removes the need for the prefix. `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` are both supported, and adding `--target <triple>` cross-compiles to the other, placing the binary under `target\<triple>\release\`.
+
+The `console` feature keeps diagnostic output attached to the terminal. `--self-test` needs an interactive desktop session because Windows rejects foreground changes from background runners. The final command produces the default Windows-subsystem binary, so startup and ordinary launches do not create a console window.
 
 ## Command line
 
