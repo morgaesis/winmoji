@@ -12,7 +12,7 @@ Run `winmoji.exe` to show the picker. The default global shortcut is `Ctrl+Shift
 
 Type to search. Misspellings, transposed letters, and stray punctuation still match. Results are ranked by match quality and by what you have picked before, so choosing an entry for a query lifts it above rivals next time. An empty search lists the catalog by most recent use, and `Ctrl+G` browses it in the same window.
 
-Hover or focus a character to show its name, code point, and type in the footer. Right-click an emoji that supports skin tones to pick a variant for one insert; the permanent default is a settings row that applies everywhere.
+Hover or focus a character to show its name, code point, and type in the footer. Clicking a character inserts it and leaves the picker open, so several can be picked in a row; the pick follows the pointer on the press and lands on the release. Right-click an emoji that supports skin tones to pick a variant for one insert; the permanent default is a settings row that applies everywhere.
 
 The footer carries Copy and Insert beside a Shift cap. Holding Shift lights the cap and both buttons switch to their keep-open form. Clicking the cap latches that state without the key, for as long as the picker is open.
 
@@ -61,6 +61,8 @@ The scrollbar takes a direct drag and its grip grows under the pointer. The mous
 ### Insertion behaviour
 
 WinMoji opens without activating its window. Search and navigation keys are captured while the original control remains focused, so transient fields such as inline rename editors stay open, and capture is released before UTF-16 input goes into that exact control. The picker closes if another application becomes active.
+
+A pick that keeps the picker open runs immediately, so holding `Shift` and picking repeatedly inserts one character per press. A pick that closes the picker waits for its own chord to come up first: closing hands the keyboard back, and a key still held would begin repeating into the application that just received the character. Modifiers held over an insert are released for the duration of it, so the text arrives as text rather than as a chord.
 
 Copying reaches the places insertion cannot. Windows UIPI blocks input into an elevated application when WinMoji is not elevated, and applications with custom controls can ignore `KEYEVENTF_UNICODE`; in that case WinMoji cancels rather than sending text to a different window.
 

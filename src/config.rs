@@ -325,6 +325,25 @@ impl Action {
         }
     }
 
+    /// Whether holding the key down should run this action again. Motion and
+    /// text size are the actions a held key should keep applying; picking,
+    /// closing and view changes happen once per press.
+    pub fn repeats(self) -> bool {
+        matches!(
+            self,
+            Self::SelectUp
+                | Self::SelectDown
+                | Self::SelectLeft
+                | Self::SelectRight
+                | Self::HalfPageUp
+                | Self::HalfPageDown
+                | Self::PageUp
+                | Self::PageDown
+                | Self::TextBigger
+                | Self::TextSmaller
+        )
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Insert => "Insert",

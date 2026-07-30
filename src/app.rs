@@ -85,11 +85,12 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, GetKeyboardLayout, GetKeyboardState, HOT_KEY_MODIFIERS, INPUT,
-    INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOD_NOREPEAT,
-    RegisterHotKey, ReleaseCapture, SendInput, SetCapture, SetFocus, ToUnicodeEx, UnregisterHotKey,
-    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LCONTROL,
-    VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RCONTROL, VK_RETURN,
-    VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT, VK_TAB, VK_UP,
+    INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+    MAPVK_VK_TO_VSC, MOD_NOREPEAT, MapVirtualKeyW, RegisterHotKey, ReleaseCapture, SendInput,
+    SetCapture, SetFocus, ToUnicodeEx, UnregisterHotKey, VIRTUAL_KEY, VK_BACK, VK_CONTROL,
+    VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LBUTTON, VK_LCONTROL, VK_LEFT, VK_LMENU,
+    VK_LSHIFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU,
+    VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_SNAPSHOT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CallNextHookEx,
@@ -873,11 +874,16 @@ struct AppState {
     dragging_resize: Option<(i32, i32)>,
     /// A click in the search field is held so the drag can extend a selection.
     dragging_search: bool,
+    /// What the left button went down on, for the actions that run on the
+    /// release. See [`handle_release`].
+    pressed_target: Option<HitTarget>,
     /// Offset from the window origin to the pointer while dragging the frame.
     dragging_move: Option<(i32, i32)>,
     capturing_shortcut: bool,
     keyboard_state: [u8; 256],
-    pending_commit: Option<bool>,
+    /// A commit that closes the picker, waiting for the keys that asked for
+    /// it to come up. See [`request_commit`].
+    pending_close: Option<PendingClose>,
     capture_active: bool,
     registered_hotkey: Hotkey,
     dpi: u32,
@@ -1083,10 +1089,11 @@ impl AppState {
             dragging_scrollbar: None,
             dragging_resize: None,
             dragging_search: false,
+            pressed_target: None,
             dragging_move: None,
             capturing_shortcut: false,
             keyboard_state: [0; 256],
-            pending_commit: None,
+            pending_close: None,
             capture_active: false,
             registered_hotkey: config.hotkey,
             dpi: 96,
@@ -2020,10 +2027,13 @@ fn run_picker(startup: bool, keep_visible: bool) -> Result<()> {
                     let key = VIRTUAL_KEY(message.wParam.0 as u16);
                     let control = key_is_down(VK_CONTROL);
                     let shift = key_is_down(VK_SHIFT);
+                    // Bit 30 of a key message is the previous key state: set
+                    // means the keyboard is repeating a key already down.
+                    let repeat = (message.lParam.0 >> 30) & 1 != 0;
                     let handled = match state.view {
                         View::Settings => handle_settings_key(state, key, control),
                         View::Shortcuts => handle_shortcuts_key(state, key, control),
-                        View::Search => handle_picker_key(state, key, control, shift),
+                        View::Search => handle_picker_key(state, key, control, shift, repeat),
                     };
                     if handled {
                         continue;
@@ -2325,7 +2335,7 @@ fn start_keyboard_capture(state: &mut AppState) -> Result<()> {
     unsafe {
         GetKeyboardState(&mut state.keyboard_state)?;
     }
-    state.pending_commit = None;
+    state.pending_close = None;
     state.capture_active = true;
     HOOK_STATE
         .hwnd
@@ -2343,7 +2353,7 @@ fn start_keyboard_capture(state: &mut AppState) -> Result<()> {
 fn stop_keyboard_capture(state: &mut AppState) {
     HOOK_STATE.active.store(false, Ordering::Release);
     state.capture_active = false;
-    state.pending_commit = None;
+    state.pending_close = None;
 }
 
 /// Shortcut recording needs the whole chord, including Alt-modified keys the
@@ -2550,6 +2560,8 @@ unsafe extern "system" fn window_proc(
                     }
                 }
             }
+            let (x, y) = mouse_point_dip(lparam, state.dpi);
+            handle_release(state, x, y);
             LRESULT(0)
         }
         WM_RBUTTONDOWN => {
@@ -2733,6 +2745,7 @@ fn release_browsing_caches(state: &mut AppState) {
 
 fn hide_picker(state: &mut AppState) {
     state.tone_picker = None;
+    state.pressed_target = None;
     // Cancel any scroll in flight so the loop never animates a hidden window.
     state.browse_scroll_target = state.browse_scroll;
     state.browse_animation = ScrollAnimation::Idle;
@@ -3158,6 +3171,9 @@ fn apply_registered_hotkey(state: &mut AppState) -> std::result::Result<(), Stri
 }
 
 fn handle_captured_key(state: &mut AppState, key: VIRTUAL_KEY, scan_code: u32, key_up: bool) {
+    // A key already down that reports another press is the keyboard
+    // repeating. Motion repeats; picking does not.
+    let repeat = !key_up && captured_key_down(&state.keyboard_state, key);
     update_captured_keyboard_state(&mut state.keyboard_state, key, key_up);
     // The footer follows Shift as it is held, so a change repaints even
     // though modifiers themselves run nothing.
@@ -3167,9 +3183,14 @@ fn handle_captured_key(state: &mut AppState, key: VIRTUAL_KEY, scan_code: u32, k
         invalidate(state.hwnd);
     }
     if key_up {
-        if state.pending_commit.is_some() && captured_commit_keys_released(&state.keyboard_state) {
-            let close_after = state.pending_commit.take().unwrap_or(false);
-            commit_selection(state, close_after);
+        if let Some(pending) = state.pending_close
+            && pending.is_ready(&state.keyboard_state)
+        {
+            state.pending_close = None;
+            match pending.action {
+                CloseAction::Insert => commit_selection(state, true),
+                CloseAction::Copy => copy_selection(state, true),
+            }
         }
         return;
     }
@@ -3186,13 +3207,7 @@ fn handle_captured_key(state: &mut AppState, key: VIRTUAL_KEY, scan_code: u32, k
         handle_shortcuts_key(state, key, control);
         return;
     }
-    if key == VK_RETURN {
-        // Enter finishes; Shift keeps the picker open for another pick, the
-        // same way Ctrl+C and Ctrl+Shift+C differ.
-        state.pending_commit = Some(!shift);
-        return;
-    }
-    if handle_picker_key(state, key, control, shift) {
+    if handle_picker_key(state, key, control, shift, repeat) {
         return;
     }
     match key {
@@ -3349,10 +3364,48 @@ fn update_captured_keyboard_state(keyboard_state: &mut [u8; 256], key: VIRTUAL_K
     }
 }
 
-fn captured_commit_keys_released(keyboard_state: &[u8; 256]) -> bool {
-    [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN, VK_RETURN]
-        .iter()
-        .all(|key| !captured_key_down(keyboard_state, *key))
+/// What a deferred close does once the keys that asked for it are up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CloseAction {
+    Insert,
+    Copy,
+}
+
+/// A close that is waiting on the keyboard, and the key that asked for it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct PendingClose {
+    action: CloseAction,
+    /// The key the binding fired on, or `VIRTUAL_KEY(0)` for a mouse click,
+    /// which has no key to wait for.
+    key: VIRTUAL_KEY,
+}
+
+impl PendingClose {
+    fn is_ready(self, keyboard_state: &[u8; 256]) -> bool {
+        [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN, self.key]
+            .iter()
+            .all(|key| !captured_key_down(keyboard_state, *key))
+    }
+}
+
+/// Ask for the close half of a pick: insert or copy, then hide the picker.
+///
+/// Closing hands the keyboard back, so a key still held when the hook stops
+/// eating it starts repeating into the target: an Enter that submits the
+/// message the glyph just went into, or a Ctrl+C that replaces the clipboard
+/// the copy just filled. The close therefore waits for the chord to come up.
+/// A pick that keeps the picker open has no such handover and runs on the
+/// press, which is what makes holding Shift and picking repeatedly work.
+fn request_commit(state: &mut AppState, action: CloseAction, key: VIRTUAL_KEY) {
+    let pending = PendingClose { action, key };
+    if !pending.is_ready(&state.keyboard_state) {
+        state.pending_close = Some(pending);
+        return;
+    }
+    match action {
+        CloseAction::Insert => commit_selection(state, true),
+        CloseAction::Copy => copy_selection(state, true),
+    }
 }
 
 fn captured_hotkey_modifiers(keyboard_state: &[u8; 256]) -> u32 {
@@ -3372,7 +3425,13 @@ fn captured_hotkey_modifiers(keyboard_state: &[u8; 256]) -> u32 {
     modifiers
 }
 
-fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool, shift: bool) -> bool {
+fn handle_picker_key(
+    state: &mut AppState,
+    key: VIRTUAL_KEY,
+    control: bool,
+    shift: bool,
+    repeat: bool,
+) -> bool {
     // The tone chooser is a transient popup layered over the picker, so the
     // dismiss key closes it before it closes anything else.
     if state
@@ -3387,7 +3446,7 @@ fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool, shif
         return true;
     }
     if let Some(action) = state.config.keys.action_for(key.0 as u32, control, shift) {
-        return run_action(state, action);
+        return run_action(state, action, key, repeat);
     }
     // The numeric keypad's own plus and minus follow the text size binding
     // whenever that binding is on the main row's plus or minus.
@@ -3397,7 +3456,7 @@ fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool, shif
         } else {
             Action::TextSmaller
         };
-        return run_action(state, action);
+        return run_action(state, action, key, repeat);
     }
     if key == VK_TAB {
         return true;
@@ -3412,23 +3471,29 @@ fn handle_picker_key(state: &mut AppState, key: VIRTUAL_KEY, control: bool, shif
         _ => None,
     };
     if let Some(action) = arrow {
-        return run_action(state, action);
+        return run_action(state, action, key, repeat);
     }
     false
 }
 
 /// Run one bound action. Motion means different things in the two views: the
 /// grid moves by a row of cells, the result list by a row of text.
-fn run_action(state: &mut AppState, action: Action) -> bool {
+fn run_action(state: &mut AppState, action: Action, key: VIRTUAL_KEY, repeat: bool) -> bool {
+    // Held keys repeat, which is what motion wants and nothing else does: a
+    // held Enter would otherwise insert the same glyph as fast as the
+    // keyboard reports it.
+    if repeat && !action.repeats() {
+        return true;
+    }
     let browsing = state.browsing();
     let columns = state
         .section_layouts()
         .get(state.browse_focus.0)
         .map_or(1, |layout| layout.columns) as isize;
     match action {
-        Action::Insert => commit_selection(state, true),
+        Action::Insert => request_commit(state, CloseAction::Insert, key),
         Action::InsertKeep => commit_selection(state, false),
-        Action::Copy => copy_selection(state, true),
+        Action::Copy => request_commit(state, CloseAction::Copy, key),
         Action::CopyKeep => copy_selection(state, false),
         Action::Dismiss => hide_picker(state),
         Action::Settings => enter_settings(state),
@@ -4611,6 +4676,51 @@ fn update_dragged_scrollbar(state: &mut AppState, y: f32) {
     }
 }
 
+/// Finish a pick the press started, if the pointer is still on it.
+///
+/// Releasing somewhere else abandons the pick, the way a button anywhere else
+/// does. The press already moved the selection, so the picker keeps showing
+/// what was under the pointer.
+fn handle_release(state: &mut AppState, x: f32, y: f32) {
+    let Some(pressed) = state.pressed_target.take() else {
+        return;
+    };
+    if hit_test(state, x, y) != Some(pressed) {
+        invalidate(state.hwnd);
+        return;
+    }
+    match pressed {
+        HitTarget::SearchResult(_) | HitTarget::BrowseItem { .. } => {
+            commit_selection(state, false);
+        }
+        HitTarget::Insert => {
+            if state.keep_open() {
+                commit_selection(state, false);
+            } else {
+                request_commit(state, CloseAction::Insert, VIRTUAL_KEY(0));
+            }
+        }
+        HitTarget::Copy => {
+            if state.keep_open() {
+                copy_selection(state, false);
+            } else {
+                request_commit(state, CloseAction::Copy, VIRTUAL_KEY(0));
+            }
+        }
+        HitTarget::ToneOption(index) => {
+            if let Some(picker) = state.tone_picker.take() {
+                let base = catalog::entries()[picker.entry_index].glyph.clone();
+                let tone = SkinTone::ALL[index.min(SkinTone::ALL.len() - 1)];
+                let text = catalog::toned(&base, tone)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| base.clone());
+                commit_text(state, text, base, false);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn handle_click(state: &mut AppState, x: f32, y: f32) {
     let target = hit_test(state, x, y);
     if state.tone_picker.is_some()
@@ -4659,15 +4769,22 @@ fn handle_click(state: &mut AppState, x: f32, y: f32) {
         HitTarget::Category(index) => state.jump_to_category(index),
         HitTarget::CategoryScrollLeft => state.scroll_categories(-CATEGORY_BUTTON_WIDTH * 2.0),
         HitTarget::CategoryScrollRight => state.scroll_categories(CATEGORY_BUTTON_WIDTH * 2.0),
+        // Picking follows the pointer on the press and runs on the release.
+        // Text goes to another application through injected input, and input
+        // injected while a mouse button is still down is liable to be dropped
+        // on the way; waiting for the button also matches how every other
+        // button on the desktop behaves.
         HitTarget::SearchResult(row) => {
             state.selected = row;
             state.sync_accessible_results();
-            commit_selection(state, false);
+            state.pressed_target = Some(target);
+            invalidate(state.hwnd);
         }
         HitTarget::BrowseItem { section, item } => {
             state.browse_focus = (section, item);
             state.sync_accessible_results();
-            commit_selection(state, false);
+            state.pressed_target = Some(target);
+            invalidate(state.hwnd);
         }
         HitTarget::Scrollbar => {
             if let Some((_, thumb)) = list_scrollbar_rects(state) {
@@ -4686,19 +4803,11 @@ fn handle_click(state: &mut AppState, x: f32, y: f32) {
             state.shift_latched = !state.shift_latched;
             invalidate(state.hwnd);
         }
-        HitTarget::Copy => copy_selection(state, !state.keep_open()),
-        HitTarget::Insert => commit_selection(state, !state.keep_open()),
-        HitTarget::TonePopup => {}
-        HitTarget::ToneOption(index) => {
-            if let Some(picker) = state.tone_picker.take() {
-                let base = catalog::entries()[picker.entry_index].glyph.clone();
-                let tone = SkinTone::ALL[index.min(SkinTone::ALL.len() - 1)];
-                let text = catalog::toned(&base, tone)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| base.clone());
-                commit_text(state, text, base, false);
-            }
+        HitTarget::Copy | HitTarget::Insert | HitTarget::ToneOption(_) => {
+            state.pressed_target = Some(target);
+            invalidate(state.hwnd);
         }
+        HitTarget::TonePopup => {}
         HitTarget::SettingRow(index) => {
             state.settings_selected = index;
             state.selected = index;
@@ -6925,46 +7034,20 @@ fn inject_unicode(target: HWND, target_focus: HWND, value: &str) -> Result<()> {
         ));
     }
 
-    for _ in 0..50 {
-        if commit_keys_released() {
-            break;
-        }
-        unsafe {
-            Sleep(10);
-        }
-    }
-    if !commit_keys_released() {
-        return Err(Error::new(
-            HRESULT(0x800705AAu32 as i32),
-            "modifier keys remained held; input was cancelled",
-        ));
-    }
+    release_held_modifiers();
+    release_held_buttons();
 
-    let current_thread = unsafe { GetCurrentThreadId() };
-    let target_thread = window_thread(target);
-    let attached = target_thread != 0
-        && target_thread != current_thread
-        && unsafe { AttachThreadInput(current_thread, target_thread, true).as_bool() };
-    let activated =
-        unsafe { foreground_window() == target || SetForegroundWindow(target).as_bool() };
-    if valid_target_focus(target, target_focus) {
-        unsafe {
-            let _ = SetFocus(Some(target_focus));
-        }
-    }
-    for _ in 0..20 {
-        if foreground_window() == target {
-            break;
-        }
-        unsafe {
-            Sleep(10);
-        }
-    }
-    if attached {
-        unsafe {
-            let _ = AttachThreadInput(current_thread, target_thread, false);
-        }
-    }
+    // Restoring focus means attaching to the target's input queue, which is
+    // disruptive enough that it is only worth doing when the target has
+    // actually lost something. A pick that leaves the picker open never took
+    // focus away in the first place, so the common case does nothing here.
+    let focus_is_lost = foreground_window() != target
+        || (valid_target_focus(target, target_focus) && focused_child_for(target) != target_focus);
+    let activated = if focus_is_lost {
+        restore_target_focus(target, target_focus)
+    } else {
+        true
+    };
     if !activated && foreground_window() != target {
         return Err(Error::new(
             HRESULT(0x80070005u32 as i32),
@@ -6996,6 +7079,40 @@ fn inject_unicode(target: HWND, target_focus: HWND, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Bring `target` back to the foreground with `target_focus` focused.
+///
+/// Focus can only be handed to another thread's window from inside its input
+/// queue, so this attaches for the duration and detaches again. Reports
+/// whether the target ended up activated.
+fn restore_target_focus(target: HWND, target_focus: HWND) -> bool {
+    let current_thread = unsafe { GetCurrentThreadId() };
+    let target_thread = window_thread(target);
+    let attached = target_thread != 0
+        && target_thread != current_thread
+        && unsafe { AttachThreadInput(current_thread, target_thread, true).as_bool() };
+    let activated =
+        unsafe { foreground_window() == target || SetForegroundWindow(target).as_bool() };
+    if valid_target_focus(target, target_focus) {
+        unsafe {
+            let _ = SetFocus(Some(target_focus));
+        }
+    }
+    for _ in 0..20 {
+        if foreground_window() == target {
+            break;
+        }
+        unsafe {
+            Sleep(10);
+        }
+    }
+    if attached {
+        unsafe {
+            let _ = AttachThreadInput(current_thread, target_thread, false);
+        }
+    }
+    activated
+}
+
 fn unicode_input(unit: u16, key_up: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
@@ -7015,10 +7132,95 @@ fn unicode_input(unit: u16, key_up: bool) -> INPUT {
     }
 }
 
-fn commit_keys_released() -> bool {
-    [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN, VK_RETURN]
+/// Modifiers the hook lets through to the system while the picker is open, so
+/// the target's own key state keeps up. The Windows keys are deliberately not
+/// here: releasing one the user is holding is what opens the Start menu, and
+/// an injected Unicode packet carries no virtual key for a Win chord to act
+/// on anyway.
+const HELD_MODIFIERS: [VIRTUAL_KEY; 6] = [
+    VK_LSHIFT,
+    VK_RSHIFT,
+    VK_LCONTROL,
+    VK_RCONTROL,
+    VK_LMENU,
+    VK_RMENU,
+];
+
+/// Release whatever modifiers are still held before text is injected.
+///
+/// The picker's own shortcut is a chord, so a pick that lands while the user
+/// is still holding it would otherwise arrive at the target underneath a live
+/// Ctrl or Alt, where an application is free to read it as a shortcut rather
+/// than as text. The release carries the injection tag, so the capture hook
+/// passes it through untouched, and the picker's view of the keyboard comes
+/// from the hook rather than from this state: the modifier stays lit while it
+/// is physically held, and its real release still arrives later.
+fn release_held_modifiers() {
+    let held: Vec<INPUT> = HELD_MODIFIERS
+        .iter()
+        .filter(|key| unsafe { GetAsyncKeyState(key.0 as i32) } < 0)
+        .map(|key| modifier_release_input(*key))
+        .collect();
+    if held.is_empty() {
+        return;
+    }
+    if unsafe { SendInput(&held, size_of::<INPUT>() as i32) } != held.len() as u32 {
+        return;
+    }
+    // The release is queued rather than applied, so let the key state catch
+    // up before the text goes out behind it.
+    for _ in 0..20 {
+        if modifiers_released() {
+            break;
+        }
+        unsafe {
+            Sleep(5);
+        }
+    }
+}
+
+/// Wait, briefly, for the mouse buttons to come up.
+///
+/// Text injected while a button is still down does not reliably reach the
+/// target: the events are accepted and then dropped somewhere between the
+/// input thread and the focused window. Picking already runs on the button
+/// release, so this only has to cover the paths that do not, and it gives up
+/// rather than holding the picker hostage to a stuck button.
+fn release_held_buttons() {
+    for _ in 0..40 {
+        if unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } >= 0 {
+            return;
+        }
+        unsafe {
+            Sleep(5);
+        }
+    }
+}
+
+fn modifiers_released() -> bool {
+    HELD_MODIFIERS
         .iter()
         .all(|key| unsafe { GetAsyncKeyState(key.0 as i32) } >= 0)
+}
+
+fn modifier_release_input(key: VIRTUAL_KEY) -> INPUT {
+    let extended = matches!(key, VK_RCONTROL | VK_RMENU);
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: key,
+                wScan: unsafe { MapVirtualKeyW(key.0 as u32, MAPVK_VK_TO_VSC) } as u16,
+                dwFlags: if extended {
+                    KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY
+                } else {
+                    KEYEVENTF_KEYUP
+                },
+                time: 0,
+                dwExtraInfo: INJECTION_TAG,
+            },
+        },
+    }
 }
 
 fn manage_startup(uninstall: bool, dry_run: bool) -> Result<()> {
@@ -7680,10 +7882,53 @@ mod tests {
             captured_hotkey_modifiers(&keyboard),
             MOD_NOREPEAT_VALUE | MOD_CONTROL_VALUE
         );
-        assert!(!captured_commit_keys_released(&keyboard));
+        let pending = PendingClose {
+            action: CloseAction::Insert,
+            key: VK_RETURN,
+        };
+        assert!(!pending.is_ready(&keyboard));
         update_captured_keyboard_state(&mut keyboard, VK_RETURN, true);
-        assert!(!captured_commit_keys_released(&keyboard));
+        assert!(!pending.is_ready(&keyboard));
         update_captured_keyboard_state(&mut keyboard, VK_LCONTROL, true);
-        assert!(captured_commit_keys_released(&keyboard));
+        assert!(pending.is_ready(&keyboard));
+    }
+
+    #[test]
+    fn a_mouse_close_waits_only_on_the_modifiers() {
+        let mut keyboard = [0u8; 256];
+        // No key asked for this one, so a held Enter is somebody else's
+        // business; the modifiers still have to come up.
+        let pending = PendingClose {
+            action: CloseAction::Copy,
+            key: VIRTUAL_KEY(0),
+        };
+        update_captured_keyboard_state(&mut keyboard, VK_RETURN, false);
+        assert!(pending.is_ready(&keyboard));
+        update_captured_keyboard_state(&mut keyboard, VK_LSHIFT, false);
+        assert!(!pending.is_ready(&keyboard));
+        update_captured_keyboard_state(&mut keyboard, VK_LSHIFT, true);
+        assert!(pending.is_ready(&keyboard));
+    }
+
+    #[test]
+    fn only_motion_actions_repeat_while_a_key_is_held() {
+        for action in Action::ALL {
+            let repeats = matches!(
+                action,
+                Action::SelectUp
+                    | Action::SelectDown
+                    | Action::SelectLeft
+                    | Action::SelectRight
+                    | Action::HalfPageUp
+                    | Action::HalfPageDown
+                    | Action::PageUp
+                    | Action::PageDown
+                    | Action::TextBigger
+                    | Action::TextSmaller
+            );
+            assert_eq!(action.repeats(), repeats, "{}", action.label());
+        }
+        assert!(!Action::Insert.repeats());
+        assert!(!Action::InsertKeep.repeats());
     }
 }
